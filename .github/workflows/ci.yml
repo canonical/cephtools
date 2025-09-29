@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    env:
+      UV_CACHE_DIR: .uv-cache
+      UV_PYTHON: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@d5f39331a73d5042e70ab770463dff632e20c127
+      - uses: extractions/setup-just@v3
+      - name: Sync dependencies
+        run: just sync
+      - name: Run lint
+        run: just lint
+      - name: Run unit tests
+        run: just unittest

@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-pex:
+    runs-on: ubuntu-latest
+    env:
+      UV_CACHE_DIR: .uv-cache
+      UV_PYTHON: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@d5f39331a73d5042e70ab770463dff632e20c127
+      - uses: extractions/setup-just@v3
+      - name: Sync dependencies
+        run: just sync
+      - name: Build PEX
+        run: just build-pex
+      - name: Collect metadata
+        run: |
+          echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+      - name: Publish latest release
+        uses: ncipollo/release-action@b7eabc95ff50cbeeedec83973935c8f306dfcd0b
+        with:
+          tag: latest
+          releaseName: Latest (build ${{ github.run_number }})
+          body: Automated release for commit ${{ github.sha }} (${ env.SHORT_SHA }).
+          draft: false
+          prerelease: false
+          allowUpdates: true
+          files: dist/cephtools
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

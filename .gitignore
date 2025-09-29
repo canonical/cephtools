@@ -1,0 +1,14 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+.pex/
+.pex-build/
+.pex-runtime/
+.pip-cache/
+.uv-cache/
+wheels/
+*.egg-info
+/state
+.venv
