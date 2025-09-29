@@ -1,0 +1,25 @@
+[project]
+name = "cephtools"
+version = "0.1.0"
+description = "Tools for the Ceph team"
+readme = "README.md"
+authors = [
+    { name = "Peter Sabaini", email = "peter.sabaini@canonical.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "click>=8.2.1",
+]
+
+[project.scripts]
+cephtools = "cephtools:main.cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.1",
+    "ruff>=0.6.9",
+]
