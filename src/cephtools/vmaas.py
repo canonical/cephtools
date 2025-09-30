@@ -24,7 +24,6 @@ DEFAULTS = dict(
 )
 
 
-# ---- small helpers ---------------------------------------------------------
 def run(cmd, check=True, shell=False, quiet=False):
     if not quiet:
         print(f"+ {cmd}")
@@ -125,7 +124,7 @@ def maas_login(maas_url, admin, api_key):
 
 def verify_maas(admin):
     import re
-    status = run("sudo maas status || true", shell=True).stdout.lower()
+    status = run("sudo maas status").stdout.lower()
     regiond_ok = re.search(r'regiond\s+enabled\s+active', status)
     rackd_ok = re.search(r'rackd\s+enabled\s+active', status)
     if not regiond_ok or not rackd_ok:
@@ -150,8 +149,29 @@ def register_lxd_vmhost_impl(admin, vmhost, ip, admin_pw):
     )
 
 
+def extract_arches(resources):
+    """
+    Return the unique CPU arches from MAAS boot-resources JSON.
+    Looks at the 'architecture' field and takes the part before '/'.
+    """
+    arches = set()
+    for item in resources:
+        arches.add(item.get("architecture"))
+    return arches
+
+
 def import_boot_resources(admin):
     run(f'maas "{admin}" boot-resources import')
+    time.sleep(10)
+    # read boot and loop until we have amd64/generic arch
+    for _ in range(20):
+        out = run(f"maas {admin} boot-resources read").stdout
+        resources = json.loads(out)
+        arches = extract_arches(resources)
+        if "amd64/generic" in arches:
+            return
+        time.sleep(6)
+    raise Exception("Failed to import boot resources")
 
 
 def route_info(lxdbridge):
