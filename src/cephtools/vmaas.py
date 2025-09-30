@@ -35,7 +35,6 @@ def run(cmd, check=True, shell=False, quiet=False):
         check=check,
         text=True,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
         shell=shell,
     )
 
@@ -230,6 +229,19 @@ def juju_onboard():
     run("juju add-credential maas-cloud -f cred.yaml --client", shell=True)
     time.sleep(2)
     run("juju bootstrap maas-cloud maas-controller", shell=True)
+    time.sleep(10)
+    # poll controller status until ready
+    for _ in range(20):
+        out = run("juju controllers --format json", shell=True).stdout
+        js = json.loads(out)
+        total_ctrl_machines = sum(
+            c.get("controller-machines", {}).get("Total", 0)
+            for c in js.get("controllers", {}).values()
+        )
+        if total_ctrl_machines > 0:
+            return
+        time.sleep(6)
+    raise Exception("juju controller machines not ready after timeout")
 
 
 # ---- click CLI ------------------------------------------------------------
