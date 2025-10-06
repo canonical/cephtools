@@ -266,7 +266,7 @@ def juju_onboard():
     run("juju add-credential maas-cloud -f cred.yaml --client", shell=True)
     time.sleep(2)
     run(
-        ("juju bootstrap maas-cloud maas-controller --bootstrap-constraints"
+        ("juju bootstrap maas-cloud maas-controller --bootstrap-constraints "
          "spaces=jujuspace --config juju-mgmt-space=jujuspace"),
         shell=True,
     )
@@ -418,6 +418,39 @@ def juju_init(ctx):
     write_cred_yaml(api_key)
     juju_onboard()
     click.echo("juju initialized and controller bootstrapped.")
+
+
+@cli.command(
+    "install",
+    help="Run all installation steps: install-deps, lxd-init, maas-init, register-vm-host, configure-network, juju-init.",
+)
+@click.pass_context
+def install(ctx):
+    """Run all vmaas installation steps in sequence."""
+    click.echo("Starting full vmaas installation...")
+
+    click.echo("\n=== Step 1/6: Installing dependencies ===")
+    ctx.invoke(install_deps)
+
+    click.echo("\n=== Step 2/6: Initializing LXD ===")
+    ctx.invoke(lxd_init_cmd)
+
+    click.echo("\n=== Step 3/6: Initializing MAAS ===")
+    ctx.invoke(maas_init_cmd)
+
+    click.echo("\n=== Step 4/6: Registering VM host ===")
+    ctx.invoke(register_vm_host)
+
+    click.echo("\n=== Step 5/6: Configuring network ===")
+    ctx.invoke(configure_network)
+
+    click.echo("\n=== Step 6/6: Initializing Juju ===")
+    ctx.invoke(juju_init)
+
+    click.echo("\n=== Installation complete! ===")
+    click.echo(f"MAAS URL: {ctx.obj['maas_url']}")
+    click.echo(f"Admin user: {ctx.obj['admin']}")
+    click.echo("You can now use 'juju status' to check your controller.")
 
 
 def main():
