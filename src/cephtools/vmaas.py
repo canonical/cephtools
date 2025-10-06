@@ -124,11 +124,14 @@ def maas_login(maas_url, admin, api_key):
 
 def verify_maas(admin):
     import re
+
     status = run("sudo maas status").stdout.lower()
-    regiond_ok = re.search(r'regiond\s+enabled\s+active', status)
-    rackd_ok = re.search(r'rackd\s+enabled\s+active', status)
+    regiond_ok = re.search(r"regiond\s+enabled\s+active", status)
+    rackd_ok = re.search(r"rackd\s+enabled\s+active", status)
     if not regiond_ok or not rackd_ok:
-        raise RuntimeError("MAAS services not running (regiond/rackd must be enabled and active)")
+        raise RuntimeError(
+            "MAAS services not running (regiond/rackd must be enabled and active)"
+        )
     _ = run(f"maas {admin} boot-resources read").stdout
 
 
@@ -177,14 +180,14 @@ def import_boot_resources(admin):
 def route_info(lxdbridge):
     out = run(f"ip -j r s dev {lxdbridge}")
     routes = json.loads(out.stdout)
-    
+
     for route in routes:
         dst = route.get("dst")
         prefsrc = route.get("prefsrc")
-        
+
         if dst and "/" in dst and prefsrc:
             return dst, prefsrc
-    
+
     raise RuntimeError(f"could not derive CIDR or gateway from routes: {routes}")
 
 
@@ -215,6 +218,7 @@ def create_dynamic_iprange(admin, subnet_id, cidr):
         f'start_ip="{start_ip}" end_ip="{end_ip}" || true',
         shell=True,
     )
+    time.sleep(12)  # wait for MAAS to process
     return start_ip, end_ip
 
 
@@ -222,6 +226,19 @@ def enable_vlan_dhcp(admin, fabric_id, vlan_id, rack_sysid):
     run(
         f"maas {admin} vlan update {fabric_id} {vlan_id} dhcp_on=true primary_rack={rack_sysid}"
     )
+
+
+def create_space(admin, space_name):
+    run(f'maas {admin} spaces create name="{space_name}"')
+    space_id = json.loads(run(f"maas {admin} spaces read").stdout)
+    space_id = next((s["id"] for s in space_id if s.get("name") == space_name), None)
+    if space_id is None:
+        raise RuntimeError(f"MAAS space '{space_name}' not found after creation")
+    return space_id
+
+
+def assign_space_to_vlan(admin, fabric_id, vlan_id, space_id):
+    run(f"maas {admin} vlan update {fabric_id} {vlan_id} space={space_id}")
 
 
 def write_cloud_yaml(ip):
@@ -248,7 +265,11 @@ def juju_onboard():
     run("juju add-cloud maas-cloud cloud.yaml", shell=True)
     run("juju add-credential maas-cloud -f cred.yaml --client", shell=True)
     time.sleep(2)
-    run("juju bootstrap maas-cloud maas-controller", shell=True)
+    run(
+        ("juju bootstrap maas-cloud maas-controller --bootstrap-constraints"
+         "spaces=jujuspace --config juju-mgmt-space=jujuspace"),
+        shell=True,
+    )
     time.sleep(10)
     # poll controller status until ready
     for _ in range(20):
@@ -377,6 +398,9 @@ def configure_network(ctx):
     create_dynamic_iprange(ctx.obj["admin"], sid, cidr)
     enable_vlan_dhcp(ctx.obj["admin"], fabric_id, vlan_id, rack_sysid)
     click.echo(f"network configured on {ctx.obj['lxdbridge']} ({cidr}, gw {gw}).")
+    space_id = create_space(ctx.obj["admin"], "jujuspace")
+    assign_space_to_vlan(ctx.obj["admin"], fabric_id, vlan_id, space_id)
+    click.echo(f"space 'jujuspace' ({space_id}) created and assigned to VLAN.")
 
 
 @cli.command(
