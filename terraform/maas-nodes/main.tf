@@ -1,0 +1,47 @@
+# 1) Compose N VMs on the LXD VM host (MAAS "VM host")
+locals {
+  vm_storage_disks = [
+    {
+      size = var.vm_root_disk_size
+    },
+    {
+      size = var.vm_data_disk_size
+    }
+  ]
+}
+
+resource "maas_vm_host_machine" "vms" {
+  count    = var.vm_count
+
+  vm_host  = var.lxd_vm_host_id
+  hostname = format("%s-%02d", var.vm_prefix, count.index + 1)
+
+  cores  = var.vm_cores
+  memory = var.vm_memory
+
+  # Disks (GiB). Per-disk pool selection is managed on the VM host in MAAS.
+  dynamic "storage_disks" {
+    for_each = local.vm_storage_disks
+    content {
+      size_gigabytes = storage_disks.value.size
+    }
+  }
+
+}
+
+# 2) Deploy them (OS + cloud-init)
+resource "maas_instance" "vms" {
+  count = var.vm_count
+
+  allocate_params {
+    hostname = maas_vm_host_machine.vms[count.index].hostname
+  }
+
+  deploy_params {
+    distro_series = var.distro_series
+    user_data     = file("${path.module}/cloud-init.yml")
+  }
+}
+
+output "vm_hostnames"     { value = [for m in maas_vm_host_machine.vms : m.hostname] }
+output "vm_ip_addresses"  { value = [for i in maas_instance.vms : i.ip_addresses] }

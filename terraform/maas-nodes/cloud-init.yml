@@ -1,0 +1,12 @@
+#cloud-config
+packages:
+  - qemu-guest-agent
+users:
+  - name: ubuntu
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ${file("~/.ssh/id_rsa.pub")}
+runcmd:
+  - systemctl enable --now qemu-guest-agent || true
