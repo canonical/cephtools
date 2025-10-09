@@ -3,7 +3,9 @@
 
 import json
 import os
+import platform
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -22,6 +24,8 @@ DEFAULTS = dict(
     lxdbridge=os.getenv("LXDBRIDGE", "lxdbr0"),
     vmhost=os.getenv("VMHOST", "local-lxd"),
 )
+
+TERRAGRUNT_VERSION = "v0.89.3"
 
 
 def run(cmd, check=True, shell=False, quiet=False):
@@ -50,14 +54,47 @@ def primary_ip() -> str:
         return out.stdout.strip().split()[0]
 
 
-def ensure_snap(name, channel=None):
+def ensure_snap(name, channel=None, classic=False):
     out = run("snap list", check=True)
     if any(line.split()[0] == name for line in out.stdout.splitlines()[1:]):
         return
-    cmd = f"sudo snap install {name}"
+    parts = ["sudo", "snap", "install", name]
     if channel:
-        cmd += f" --channel={channel}"
-    run(cmd)
+        parts.append(f"--channel={channel}")
+    if classic:
+        parts.append("--classic")
+    run(" ".join(parts))
+
+
+def ensure_terragrunt(version=TERRAGRUNT_VERSION, bin_dir="/usr/local/bin"):
+    bin_path = Path(bin_dir) / "terragrunt"
+    if bin_path.exists() or shutil.which("terragrunt"):
+        return
+
+    system = platform.system().lower()
+    if not system.startswith("linux"):
+        raise RuntimeError("Terragrunt installer currently supports only Linux hosts")
+    system = "linux"
+
+    machine = platform.machine().lower()
+    arch_map = {
+        "x86_64": "amd64",
+        "amd64": "amd64",
+        "aarch64": "arm64",
+        "arm64": "arm64",
+    }
+    arch = arch_map.get(machine)
+    if arch is None:
+        raise RuntimeError(f"Unsupported architecture for terragrunt: {platform.machine()}")
+
+    terragrunt_bin = f"terragrunt_{system}_{arch}"
+    terragrunt_url = (
+        f"https://github.com/gruntwork-io/terragrunt/releases/download/{version}/{terragrunt_bin}"
+    )
+
+    run(f"curl -fsSL -o {terragrunt_bin} {terragrunt_url}")
+    run(f"chmod +x {terragrunt_bin}")
+    run(f"sudo mv {terragrunt_bin} {bin_path}")
 
 
 def lxd_ready():
@@ -337,12 +374,17 @@ def cli(ctx, admin, admin_pw, admin_mail, maas_ch, lxdbridge, vmhost):
     ctx.obj["maas_url"] = f"http://{ctx.obj['ip']}:5240/MAAS"
 
 
-@cli.command("install-deps", help="Install snaps: maas, maas-test-db, lxd.")
+@cli.command(
+    "install-deps",
+    help="Install snaps and tools: maas, maas-test-db, lxd, terraform, terragrunt.",
+)
 @click.pass_context
 def install_deps(ctx):
     ensure_snap("maas", channel=ctx.obj["maas_ch"])
     ensure_snap("maas-test-db")
     ensure_snap("lxd")
+    ensure_snap("terraform", classic=True)
+    ensure_terragrunt()
     lxd_ready()
     click.echo("deps installed.")
 
