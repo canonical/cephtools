@@ -44,6 +44,11 @@ variable "vm_data_disk_size" {
   default = 16
 }
 
+variable "vm_data_disk_count" {
+  type    = number
+  default = 1
+}
+
 variable "primary_subnet_cidr" {
   type    = string
 }

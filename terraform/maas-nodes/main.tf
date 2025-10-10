@@ -1,13 +1,13 @@
 # 1) Compose N VMs on the LXD VM host (MAAS "VM host")
 locals {
-  vm_storage_disks = [
-    {
-      size = var.vm_root_disk_size
-    },
-    {
-      size = var.vm_data_disk_size
-    }
-  ]
+  vm_storage_disks = concat(
+    [
+      {
+        size = var.vm_root_disk_size
+      }
+    ],
+    [for _ in range(var.vm_data_disk_count) : { size = var.vm_data_disk_size }]
+  )
 }
 
 resource "maas_vm_host_machine" "vms" {
