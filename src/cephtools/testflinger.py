@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
-import os
 import subprocess
-import tempfile
+import uuid
 from collections import deque
 from pathlib import Path
 from typing import Callable, Iterable
@@ -30,7 +29,6 @@ Runner = Callable[..., subprocess.CompletedProcess]
 @dataclasses.dataclass
 class BackendConfig:
     launchpad_account: str
-    ssh_identity_file: str
     job_tag: str | None = None
     mattermost_name: str | None = None
 
@@ -38,7 +36,7 @@ class BackendConfig:
 @dataclasses.dataclass
 class ReservationDetails:
     job_id: str
-    node_name: str
+    queue_name: str
     user: str
     ip: str
     expires_at: dt.datetime
@@ -70,19 +68,17 @@ def load_backend_config(path: Path) -> BackendConfig:
     data = _load_simple_yaml(path)
     try:
         launchpad_account = data["launchpad_account"]
-        ssh_identity_file = data["ssh_identity_file"]
     except KeyError as exc:  # pragma: no cover - defensive
         raise click.ClickException(
             f"Missing required key {exc!s} in {path}"
         ) from exc
-    if launchpad_account is None or ssh_identity_file is None:
+    if launchpad_account is None:
         raise click.ClickException(
             f"Incomplete configuration in {path}: "
-            "launchpad_account and ssh_identity_file must be set."
+            "launchpad_account must be set."
         )
     return BackendConfig(
         launchpad_account=launchpad_account,
-        ssh_identity_file=ssh_identity_file,
         job_tag=data.get("job_tag"),
         mattermost_name=data.get("mattermost_name"),
     )
@@ -92,7 +88,6 @@ def save_backend_config(path: Path, config: BackendConfig) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         f"launchpad_account: {config.launchpad_account}",
-        f"ssh_identity_file: {config.ssh_identity_file}",
         f"job_tag: {config.job_tag if config.job_tag is not None else 'null'}",
         "mattermost_name: "
         + (
@@ -108,7 +103,6 @@ def save_backend_config(path: Path, config: BackendConfig) -> None:
 def ensure_backend_config(
     path: Path,
     launchpad_account: str | None,
-    ssh_identity_file: str | None,
     job_tag: str | None,
     mattermost_name: str | None,
 ) -> tuple[BackendConfig, bool]:
@@ -117,7 +111,6 @@ def ensure_backend_config(
             value is not None
             for value in (
                 launchpad_account,
-                ssh_identity_file,
                 job_tag,
                 mattermost_name,
             )
@@ -131,26 +124,20 @@ def ensure_backend_config(
         raise click.ClickException(
             "Configuration file is missing. Provide --launchpad-account."
         )
-    if ssh_identity_file is None:
-        raise click.ClickException(
-            "Configuration file is missing. Provide --ssh-identity-file."
-        )
-
     config = BackendConfig(
         launchpad_account=launchpad_account,
-        ssh_identity_file=ssh_identity_file,
         job_tag=job_tag,
         mattermost_name=mattermost_name,
     )
     save_backend_config(path, config)
     click.echo(f"Saved configuration to {path}")
     click.echo(
-        "Run the command again to reserve a node, now that the config exists."
+        "Run the command again to reserve a queue, now that the config exists."
     )
     return (config, True)
 
 
-def build_job_file(config: BackendConfig, node_name: str, reserve_for: int) -> str:
+def build_job_file(config: BackendConfig, queue_name: str, reserve_for: int) -> str:
     lines: list[str] = []
     if config.mattermost_name:
         lines.append(
@@ -160,7 +147,7 @@ def build_job_file(config: BackendConfig, node_name: str, reserve_for: int) -> s
         lines.append("tags:")
         lines.append(f"  - {config.job_tag}")
         lines.append("")
-    lines.append(f"job_queue: {node_name}")
+    lines.append(f"job_queue: {queue_name}")
     lines.append("")
     lines.append("provision_data:")
     lines.append("  distro: noble")
@@ -173,12 +160,12 @@ def build_job_file(config: BackendConfig, node_name: str, reserve_for: int) -> s
     return "\n".join(lines)
 
 
-def write_job_file(config: BackendConfig, node_name: str, reserve_for: int) -> Path:
-    job_contents = build_job_file(config, node_name, reserve_for)
-    tmp = tempfile.NamedTemporaryFile("w", delete=False, suffix=".yaml")
-    with tmp:
-        tmp.write(job_contents)
-    return Path(tmp.name)
+def write_job_file(config: BackendConfig, queue_name: str, reserve_for: int) -> Path:
+    job_contents = build_job_file(config, queue_name, reserve_for)
+    base_dir = Path.home()
+    job_path = base_dir / f"reserve-{queue_name}-{uuid.uuid4().hex}.yaml"
+    job_path.write_text(job_contents)
+    return job_path
 
 
 def parse_submit_output(stdout: str) -> str:
@@ -197,12 +184,12 @@ def parse_submit_output(stdout: str) -> str:
 
 def submit_reserve_job(
     config: BackendConfig,
-    node_name: str,
+    queue_name: str,
     reserve_for: int,
     runner: Runner,
     testflinger_bin: str,
 ) -> str:
-    job_file = write_job_file(config, node_name, reserve_for)
+    job_file = write_job_file(config, queue_name, reserve_for)
     try:
         result = runner(
             [testflinger_bin, "submit", str(job_file)],
@@ -222,7 +209,7 @@ def submit_reserve_job(
 
 def _parse_reservation_window(
     window: Iterable[str],
-    node_name: str,
+    queue_name: str,
 ) -> ReservationDetails | None:
     window_list = list(window)
     if len(window_list) != len(RESERVATION_PREFIXES):
@@ -250,7 +237,7 @@ def _parse_reservation_window(
         return None
     return ReservationDetails(
         job_id=job_id,
-        node_name=node_name,
+        queue_name=queue_name,
         user=user,
         ip=ip,
         expires_at=expires_dt,
@@ -259,7 +246,7 @@ def _parse_reservation_window(
 
 
 def await_reservation_details(
-    node_name: str,
+    queue_name: str,
     job_id: str,
     testflinger_bin: str,
     echo: Callable[[str], None],
@@ -283,7 +270,7 @@ def await_reservation_details(
             stripped = line.rstrip("\n")
             echo(stripped)
             window.append(stripped)
-            maybe_details = _parse_reservation_window(window, node_name)
+            maybe_details = _parse_reservation_window(window, queue_name)
             if maybe_details is not None:
                 details = maybe_details
                 break
@@ -314,88 +301,47 @@ def await_reservation_details(
     return details
 
 
-def configure_ssh(
-    node_name: str,
-    details: ReservationDetails,
-    ssh_identity_file: str,
-    runner: Runner,
-    ssh_config_dir: Path | None = None,
-) -> Path:
-    identity = Path(ssh_identity_file).expanduser()
-    config_dir = (
-        ssh_config_dir
-        if ssh_config_dir is not None
-        else Path.home() / ".ssh" / "testflinger"
-    )
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config_path = config_dir / f"{node_name}.conf"
-    config = "\n".join(
-        [
-            f"Host {node_name} {details.ip}",
-            f"    Hostname {details.ip}",
-            "    StrictHostKeyChecking no",
-            f"    User {details.user}",
-            f"    IdentityFile {identity}",
-            "",
-        ]
-    )
-    config_path.write_text(config)
-    os.chmod(config_path, 0o600)
-    runner(
-        ["ssh-keygen", "-R", details.ip],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return config_path
-
-
 def reserve_node(
-    node_name: str,
+    queue_name: str,
     reserve_for: int,
     config: BackendConfig,
     testflinger_bin: str,
     runner: Runner,
     echo: Callable[[str], None],
-    ssh_config_dir: Path | None = None,
-) -> tuple[ReservationDetails, Path]:
+) -> ReservationDetails:
     job_id = submit_reserve_job(
         config,
-        node_name,
+        queue_name,
         reserve_for,
         runner=runner,
         testflinger_bin=testflinger_bin,
     )
-    echo(f"Submitted job {job_id} to reserve {node_name}. Waiting for details…")
+    echo(f"Submitted job {job_id} to reserve {queue_name}. Waiting for details.")
     details = await_reservation_details(
-        node_name=node_name,
+        queue_name=queue_name,
         job_id=job_id,
         testflinger_bin=testflinger_bin,
         echo=echo,
     )
-    ssh_config_path = configure_ssh(
-        node_name,
-        details,
-        config.ssh_identity_file,
-        runner=runner,
-        ssh_config_dir=ssh_config_dir,
-    )
-    return details, ssh_config_path
+    return details
 
 
 def print_reservation_summary(
     details: ReservationDetails,
-    conf_path: Path,
     testflinger_bin: str,
     echo: Callable[[str], None],
 ) -> None:
     echo("")
     echo(
-        f"Reserved node {details.node_name} under job {details.job_id}. "
+        f"Reserved queue {details.queue_name} under job {details.job_id}. "
         f"Reservation expires at {details.expires_at.isoformat()}."
     )
-    echo(f"SSH config written to {conf_path}")
-    echo(f"Connect with: ssh {details.node_name}")
+    ssh_command = (
+        "ssh -o 'StrictHostKeyChecking=no' "
+        "-o 'UserKnownHostsFile=/dev/null' "
+        f"'{details.user}@{details.ip}'"
+    )
+    echo(f"Connect with: {ssh_command}")
     echo(f"Cancel early with: {testflinger_bin} cancel {details.job_id}")
 
 
@@ -415,12 +361,21 @@ def build_deploy_script() -> str:
 
 
 def perform_remote_deploy(
-    node_name: str,
+    details: ReservationDetails,
     script: str,
     runner: Runner,
 ) -> None:
     result = runner(
-        ["ssh", node_name, "bash", "-se"],
+        [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            f"{details.user}@{details.ip}",
+            "bash",
+            "-se",
+        ],
         input=script,
         text=True,
         check=False,
@@ -437,7 +392,7 @@ def cli() -> None:  # pragma: no cover - exercised via click integration tests
 
 
 @cli.command("reserve")
-@click.argument("node_name")
+@click.argument("queue_name", required=False, default="ceph-qa-1")
 @click.option(
     "--reserve-for",
     type=int,
@@ -454,7 +409,6 @@ def cli() -> None:  # pragma: no cover - exercised via click integration tests
     help="Path to the backend configuration file.",
 )
 @click.option("--launchpad-account", help="Launchpad account used for ssh access.")
-@click.option("--ssh-identity-file", help="SSH identity file to use when connecting.")
 @click.option("--job-tag", help="Optional job tag to include in submit jobs.")
 @click.option(
     "--mattermost-name",
@@ -467,31 +421,29 @@ def cli() -> None:  # pragma: no cover - exercised via click integration tests
     help="Path to the testflinger CLI binary.",
 )
 def reserve(  # pragma: no cover - exercised via click integration tests
-    node_name: str,
+    queue_name: str,
     reserve_for: int,
     config_path: Path,
     launchpad_account: str | None,
-    ssh_identity_file: str | None,
     job_tag: str | None,
     mattermost_name: str | None,
     testflinger_bin: str,
 ) -> None:
-    """Reserve a Testflinger node and configure SSH access."""
+    """Reserve a Testflinger queue and configure SSH access."""
     if reserve_for <= 0:
         raise click.ClickException("--reserve-for must be a positive integer.")
 
     config, created = ensure_backend_config(
         config_path,
         launchpad_account,
-        ssh_identity_file,
         job_tag,
         mattermost_name,
     )
     if created:
         return
 
-    details, conf_path = reserve_node(
-        node_name=node_name,
+    details = reserve_node(
+        queue_name=queue_name,
         reserve_for=reserve_for,
         config=config,
         testflinger_bin=testflinger_bin,
@@ -499,11 +451,11 @@ def reserve(  # pragma: no cover - exercised via click integration tests
         echo=click.echo,
     )
 
-    print_reservation_summary(details, conf_path, testflinger_bin, click.echo)
+    print_reservation_summary(details, testflinger_bin, click.echo)
 
 
 @cli.command("deploy")
-@click.argument("node_name")
+@click.argument("queue_name", required=False, default="ceph-qa-1")
 @click.option(
     "--reserve-for",
     type=int,
@@ -520,7 +472,6 @@ def reserve(  # pragma: no cover - exercised via click integration tests
     help="Path to the backend configuration file.",
 )
 @click.option("--launchpad-account", help="Launchpad account used for ssh access.")
-@click.option("--ssh-identity-file", help="SSH identity file to use when connecting.")
 @click.option("--job-tag", help="Optional job tag to include in submit jobs.")
 @click.option(
     "--mattermost-name",
@@ -533,31 +484,29 @@ def reserve(  # pragma: no cover - exercised via click integration tests
     help="Path to the testflinger CLI binary.",
 )
 def deploy(  # pragma: no cover - exercised via click integration tests
-    node_name: str,
+    queue_name: str,
     reserve_for: int,
     config_path: Path,
     launchpad_account: str | None,
-    ssh_identity_file: str | None,
     job_tag: str | None,
     mattermost_name: str | None,
     testflinger_bin: str,
 ) -> None:
-    """Reserve a node and install cephtools + VMaaS on it."""
+    """Reserve a queue and install cephtools + VMaaS on it."""
     if reserve_for <= 0:
         raise click.ClickException("--reserve-for must be a positive integer.")
 
     config, created = ensure_backend_config(
         config_path,
         launchpad_account,
-        ssh_identity_file,
         job_tag,
         mattermost_name,
     )
     if created:
         return
 
-    details, conf_path = reserve_node(
-        node_name=node_name,
+    details = reserve_node(
+        queue_name=queue_name,
         reserve_for=reserve_for,
         config=config,
         testflinger_bin=testflinger_bin,
@@ -565,21 +514,21 @@ def deploy(  # pragma: no cover - exercised via click integration tests
         echo=click.echo,
     )
 
-    print_reservation_summary(details, conf_path, testflinger_bin, click.echo)
+    print_reservation_summary(details, testflinger_bin, click.echo)
 
     click.echo("")
-    click.echo("Configuring remote environment for VMaaS deployment…")
+    click.echo("Configuring remote environment for VMaaS deployment.")
     script = build_deploy_script()
     try:
         perform_remote_deploy(
-            node_name=node_name,
+            details=details,
             script=script,
             runner=subprocess.run,
         )
     except click.ClickException as exc:
         raise click.ClickException(
-            f"Failed to deploy VMaaS on {node_name}: {exc.message}"
+            "Failed to deploy VMaaS on queue "
+            f"{details.queue_name} ({details.ip}): {exc.message}"
         ) from exc
 
     click.echo("Remote deployment succeeded. VMaaS should now be installed.")
-

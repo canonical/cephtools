@@ -299,7 +299,7 @@ def write_cred_yaml(api_key):
 
 
 def juju_onboard():
-    run("juju add-cloud maas-cloud cloud.yaml", shell=True)
+    run("juju add-cloud maas-cloud cloud.yaml --client", shell=True)
     run("juju add-credential maas-cloud -f cred.yaml --client", shell=True)
     time.sleep(2)
     run(
