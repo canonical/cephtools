@@ -84,6 +84,89 @@ def load_backend_config(path: Path) -> BackendConfig:
     )
 
 
+def _coerce_yaml_scalar(value: str) -> str | list[str] | None:
+    lower = value.lower()
+    if lower in {"null", "none", "~"}:
+        return None
+    if (value.startswith("'") and value.endswith("'")) or (
+        value.startswith('"') and value.endswith('"')
+    ):
+        value = value[1:-1]
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        if not inner:
+            return []
+        return [
+            item.strip().strip("'").strip('"')
+            for item in inner.split(",")
+            if item.strip()
+        ]
+    return value
+
+
+def _load_nested_yaml(path: Path) -> dict[str, object]:
+    if not path.exists():
+        raise click.ClickException(f"Expected configuration file at {path}")
+    root: dict[str, object] = {}
+    stack: list[tuple[dict[str, object], int]] = [(root, -1)]
+    for raw_line in path.read_text().splitlines():
+        if not raw_line.strip() or raw_line.strip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        if ":" not in raw_line:
+            raise click.ClickException(
+                f"Invalid YAML line in {path}: '{raw_line}'"
+            )
+        key, raw_value = raw_line.split(":", 1)
+        key = key.strip()
+        value = raw_value.strip()
+        while stack and indent <= stack[-1][1]:
+            stack.pop()
+        parent = stack[-1][0]
+        if value == "":
+            new_mapping: dict[str, object] = {}
+            parent[key] = new_mapping
+            stack.append((new_mapping, indent))
+        else:
+            parent[key] = _coerce_yaml_scalar(value)
+    return root
+
+
+def read_vmaas_network_config(path: Path = Path("network.yaml")) -> dict[str, object]:
+    data = _load_nested_yaml(path)
+    try:
+        network = data["network"]
+    except KeyError as exc:
+        raise click.ClickException(
+            f"{path} is missing the 'network' section."
+        ) from exc
+    if not isinstance(network, dict):
+        raise click.ClickException(
+            f"{path} has unexpected structure for the 'network' section."
+        )
+    return network
+
+
+def read_vmaas_cloud_config(path: Path = Path("cloud.yaml")) -> dict[str, object]:
+    data = _load_nested_yaml(path)
+    try:
+        return data["clouds"]
+    except KeyError as exc:
+        raise click.ClickException(
+            f"{path} is missing the 'clouds' section."
+        ) from exc
+
+
+def read_vmaas_credentials(path: Path = Path("cred.yaml")) -> dict[str, object]:
+    data = _load_nested_yaml(path)
+    try:
+        return data["credentials"]
+    except KeyError as exc:
+        raise click.ClickException(
+            f"{path} is missing the 'credentials' section."
+        ) from exc
+
+
 def save_backend_config(path: Path, config: BackendConfig) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
@@ -326,6 +409,14 @@ def reserve_node(
     return details
 
 
+def _build_ssh_command(details: ReservationDetails) -> str:
+    return (
+        "ssh -o 'StrictHostKeyChecking=no' "
+        "-o 'UserKnownHostsFile=/dev/null' "
+        f"'{details.user}@{details.ip}'"
+    )
+
+
 def print_reservation_summary(
     details: ReservationDetails,
     testflinger_bin: str,
@@ -336,12 +427,7 @@ def print_reservation_summary(
         f"Reserved queue {details.queue_name} under job {details.job_id}. "
         f"Reservation expires at {details.expires_at.isoformat()}."
     )
-    ssh_command = (
-        "ssh -o 'StrictHostKeyChecking=no' "
-        "-o 'UserKnownHostsFile=/dev/null' "
-        f"'{details.user}@{details.ip}'"
-    )
-    echo(f"Connect with: {ssh_command}")
+    echo(f"Connect with: {_build_ssh_command(details)}")
     echo(f"Cancel early with: {testflinger_bin} cancel {details.job_id}")
 
 
@@ -350,6 +436,8 @@ def build_deploy_script() -> str:
         [
             "set -euxo pipefail",
             "sudo snap install astral-uv --classic",
+            "mkdir -p ~/src",
+            "cd ~/src",
             "git clone https://github.com/canonical/cephtools.git",
             "cd cephtools/",
             "uv pip install --system --prefix ~/.local .",
@@ -532,3 +620,4 @@ def deploy(  # pragma: no cover - exercised via click integration tests
         ) from exc
 
     click.echo("Remote deployment succeeded. VMaaS should now be installed.")
+    click.echo(f"Connect with: {_build_ssh_command(details)}")

@@ -14,6 +14,11 @@ from ipaddress import ip_network
 from pathlib import Path
 
 import click
+from cephtools.testflinger import (
+    read_vmaas_cloud_config,
+    read_vmaas_credentials,
+    read_vmaas_network_config,
+)
 
 # ---- defaults via env ------------------------------------------------------
 DEFAULTS = dict(
@@ -278,6 +283,25 @@ def assign_space_to_vlan(admin, fabric_id, vlan_id, space_id):
     run(f"maas {admin} vlan update {fabric_id} {vlan_id} space={space_id}")
 
 
+def _get_lxd_vm_host_id(admin: str, vmhost: str) -> str:
+    result = run(f"maas {admin} vm-hosts read")
+    try:
+        hosts = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
+        raise click.ClickException(
+            "Failed to parse MAAS vm-hosts output as JSON."
+        ) from exc
+    for host in hosts:
+        if host.get("name") == vmhost:
+            host_id = host.get("id") or host.get("system_id")
+            if host_id is None:
+                break
+            return str(host_id)
+    raise click.ClickException(
+        f"VM host '{vmhost}' not found in MAAS vm-hosts output."
+    )
+
+
 def write_cloud_yaml(ip):
     Path("cloud.yaml").write_text(
         "clouds:\n"
@@ -320,6 +344,64 @@ def juju_onboard():
             return
         time.sleep(6)
     raise Exception("juju controller machines not ready after timeout")
+
+
+def _create_nodes_impl(
+    ctx_obj: dict[str, str],
+    vm_data_disk_size: int,
+    vm_data_disk_count: int,
+) -> None:
+    if vm_data_disk_size <= 0 or vm_data_disk_count <= 0:
+        raise click.ClickException(
+            "--vm-data-disk-size and --vm-data-disk-count must be positive."
+        )
+
+    vm_host_id = _get_lxd_vm_host_id(ctx_obj["admin"], ctx_obj["vmhost"])
+
+    clouds = read_vmaas_cloud_config()
+    try:
+        maas_cloud = clouds["maas-cloud"]
+        maas_api_url = maas_cloud["endpoint"]
+    except KeyError as exc:
+        raise click.ClickException(
+            "cloud.yaml is missing required maas-cloud endpoint."
+        ) from exc
+
+    credentials = read_vmaas_credentials()
+    try:
+        maas_api_key = credentials["maas-cloud"]["admin"]["maas-oauth"]
+    except KeyError as exc:
+        raise click.ClickException(
+            "cred.yaml is missing maas-cloud admin credentials."
+        ) from exc
+
+    network = read_vmaas_network_config()
+    try:
+        primary_subnet_cidr = network["cidr"]
+    except KeyError as exc:
+        raise click.ClickException(
+            "network.yaml is missing the primary subnet CIDR."
+        ) from exc
+
+    terragrunt_dir = Path(__file__).resolve().parents[2] / "terraform" / "maas-nodes"
+    if not terragrunt_dir.exists():
+        raise click.ClickException(
+            f"Expected terragrunt directory at {terragrunt_dir}."
+        )
+
+    var_args = [
+        f"-var {shlex.quote(f'maas_api_url={maas_api_url}')}",
+        f"-var {shlex.quote(f'maas_api_key={maas_api_key}')}",
+        f"-var {shlex.quote(f'lxd_vm_host_id={vm_host_id}')}",
+        f"-var {shlex.quote(f'vm_data_disk_size={vm_data_disk_size}')}",
+        f"-var {shlex.quote(f'vm_data_disk_count={vm_data_disk_count}')}",
+        f"-var {shlex.quote(f'primary_subnet_cidr={primary_subnet_cidr}')}",
+    ]
+    terragrunt_cmd = " ".join(["terragrunt", "apply", "-auto-approve", *var_args])
+    run(
+        f"cd {shlex.quote(str(terragrunt_dir))} && {terragrunt_cmd}",
+        shell=True,
+    )
 
 
 # ---- click CLI ------------------------------------------------------------
@@ -437,12 +519,55 @@ def configure_network(ctx):
     cidr, gw = route_info(ctx.obj["lxdbridge"])
     sid, fabric_id, vlan_id, rack_sysid = maas_subnet_ids(ctx.obj["admin"], cidr)
     update_subnet_gateway(ctx.obj["admin"], sid, gw)
-    create_dynamic_iprange(ctx.obj["admin"], sid, cidr)
+    start_ip, end_ip = create_dynamic_iprange(ctx.obj["admin"], sid, cidr)
     enable_vlan_dhcp(ctx.obj["admin"], fabric_id, vlan_id, rack_sysid)
     click.echo(f"network configured on {ctx.obj['lxdbridge']} ({cidr}, gw {gw}).")
     space_id = create_space(ctx.obj["admin"], "jujuspace")
     assign_space_to_vlan(ctx.obj["admin"], fabric_id, vlan_id, space_id)
     click.echo(f"space 'jujuspace' ({space_id}) created and assigned to VLAN.")
+    network_yaml = "\n".join(
+        [
+            "network:",
+            f"  bridge: {ctx.obj['lxdbridge']}",
+            f"  cidr: {cidr}",
+            f"  gateway: {gw}",
+            "  dynamic_range:",
+            f"    start: {start_ip}",
+            f"    end: {end_ip}",
+            f"  subnet_id: {sid}",
+            f"  fabric_id: {fabric_id}",
+            f"  vlan_id: {vlan_id}",
+            f"  rack_sysid: {rack_sysid}",
+            f"  space_id: {space_id}",
+            "",
+        ]
+    )
+    Path("network.yaml").write_text(network_yaml)
+    click.echo("network.yaml written with current network configuration.")
+
+
+@cli.command(
+    "create-nodes",
+    help="Provision MAAS VMs using terragrunt and existing VMaaS configuration files.",
+)
+@click.option(
+    "--vm-data-disk-size",
+    type=int,
+    required=True,
+    help="Size in GB for each data disk attached to the VMs.",
+)
+@click.option(
+    "--vm-data-disk-count",
+    type=int,
+    required=True,
+    help="Number of data disks to attach to each VM.",
+)
+@click.pass_context
+def create_nodes(ctx, vm_data_disk_size: int, vm_data_disk_count: int) -> None:
+    _create_nodes_impl(ctx.obj, vm_data_disk_size, vm_data_disk_count)
+    click.echo(
+        "Terragrunt apply completed; MAAS should begin provisioning the nodes."
+    )
 
 
 @cli.command(
