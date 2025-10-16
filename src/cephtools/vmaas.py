@@ -14,23 +14,19 @@ from ipaddress import ip_network
 from pathlib import Path
 
 import click
+from cephtools.config import (
+    DEFAULT_VMAAS_DEFAULTS,
+    read_cephtools_config,
+)
 from cephtools.state import get_state_file
 from cephtools.testflinger import (
-    read_cephtools_config,
     read_vmaas_cloud_config,
     read_vmaas_credentials,
     read_vmaas_network_config,
 )
 
 # ---- defaults via env ------------------------------------------------------
-DEFAULTS = dict(
-    maas_ch=os.getenv("MAAS_CH", "3.6/stable"),
-    admin=os.getenv("MAAS_ADMIN", "admin"),
-    admin_pw=os.getenv("MAAS_ADMIN_PW", "maaspass"),
-    admin_mail=os.getenv("MAAS_ADMIN_MAIL", "admin@example.com"),
-    lxdbridge=os.getenv("LXDBRIDGE", "lxdbr0"),
-    vmhost=os.getenv("VMHOST", "local-lxd"),
-)
+DEFAULTS = DEFAULT_VMAAS_DEFAULTS.copy()
 
 TERRAGRUNT_VERSION = "v0.89.3"
 

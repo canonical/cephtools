@@ -1,9 +1,12 @@
 import click
 
+from cephtools.config import ensure_cephtools_config
 from cephtools.reltool import charm_rel, list_prs
 from cephtools.testflinger import cli as testflinger_cli
 from cephtools.vmaas import cli as vmaas_cli
 from cephtools.juju import cli as juju_cli
+
+ensure_cephtools_config()
 
 
 @click.group()

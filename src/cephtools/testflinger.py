@@ -11,11 +11,19 @@ from typing import Callable, Iterable
 
 import click
 
+from cephtools.config import (
+    DEFAULT_TESTFLINGER_CONFIG_PATH,
+    DEFAULT_TESTFLINGER_DEPLOY_RESERVE_FOR,
+    DEFAULT_TESTFLINGER_RESERVE_FOR,
+    load_nested_yaml,
+    read_cephtools_config,
+)
 from cephtools.state import get_state_file
 
 
-DEFAULT_CONFIG_PATH = get_state_file("testflinger.yaml", ensure_parent=False)
-DEFAULT_RESERVE_FOR = 3600
+DEFAULT_CONFIG_PATH = DEFAULT_TESTFLINGER_CONFIG_PATH
+DEFAULT_RESERVE_FOR = DEFAULT_TESTFLINGER_RESERVE_FOR
+DEFAULT_DEPLOY_RESERVE_FOR = DEFAULT_TESTFLINGER_DEPLOY_RESERVE_FOR
 
 RESERVATION_PREFIXES = [
     "*** TESTFLINGER SYSTEM RESERVED ***",
@@ -87,73 +95,12 @@ def load_backend_config(path: Path) -> BackendConfig:
     )
 
 
-def _coerce_yaml_scalar(value: str) -> str | list[str] | None:
-    lower = value.lower()
-    if lower in {"null", "none", "~"}:
-        return None
-    if (value.startswith("'") and value.endswith("'")) or (
-        value.startswith('"') and value.endswith('"')
-    ):
-        value = value[1:-1]
-    if value.startswith("[") and value.endswith("]"):
-        inner = value[1:-1].strip()
-        if not inner:
-            return []
-        return [
-            item.strip().strip("'").strip('"')
-            for item in inner.split(",")
-            if item.strip()
-        ]
-    return value
-
-
-def _load_nested_yaml(path: Path) -> dict[str, object]:
-    if not path.exists():
-        raise click.ClickException(f"Expected configuration file at {path}")
-    root: dict[str, object] = {}
-    stack: list[tuple[dict[str, object], int]] = [(root, -1)]
-    for raw_line in path.read_text().splitlines():
-        if not raw_line.strip() or raw_line.strip().startswith("#"):
-            continue
-        indent = len(raw_line) - len(raw_line.lstrip(" "))
-        if ":" not in raw_line:
-            raise click.ClickException(
-                f"Invalid YAML line in {path}: '{raw_line}'"
-            )
-        key, raw_value = raw_line.split(":", 1)
-        key = key.strip()
-        value = raw_value.strip()
-        while stack and indent <= stack[-1][1]:
-            stack.pop()
-        parent = stack[-1][0]
-        if value == "":
-            new_mapping: dict[str, object] = {}
-            parent[key] = new_mapping
-            stack.append((new_mapping, indent))
-        else:
-            parent[key] = _coerce_yaml_scalar(value)
-    return root
-
-
-def read_cephtools_config(path: Path | None = None) -> dict[str, object]:
-    target = (path or get_state_file("cephtools.yaml")).expanduser()
-    if not target.exists():
-        return {}
-    data = _load_nested_yaml(target)
-    section = data.get("cephtools")
-    if section is None:
-        return data
-    if not isinstance(section, dict):
-        raise click.ClickException(
-            f"{target} has unexpected structure for the 'cephtools' section."
-        )
-    return section
-
-
 def read_vmaas_network_config(path: Path | None = None) -> dict[str, object]:
     target = Path(path) if path is not None else get_state_file("network.yaml")
     target = target.expanduser()
-    data = _load_nested_yaml(target)
+    if not target.exists():
+        raise click.ClickException(f"Expected configuration file at {target}")
+    data = load_nested_yaml(target)
     try:
         network = data["network"]
     except KeyError as exc:
@@ -170,7 +117,9 @@ def read_vmaas_network_config(path: Path | None = None) -> dict[str, object]:
 def read_vmaas_cloud_config(path: Path | None = None) -> dict[str, object]:
     target = Path(path) if path is not None else get_state_file("cloud.yaml")
     target = target.expanduser()
-    data = _load_nested_yaml(target)
+    if not target.exists():
+        raise click.ClickException(f"Expected configuration file at {target}")
+    data = load_nested_yaml(target)
     try:
         return data["clouds"]
     except KeyError as exc:
@@ -182,7 +131,9 @@ def read_vmaas_cloud_config(path: Path | None = None) -> dict[str, object]:
 def read_vmaas_credentials(path: Path | None = None) -> dict[str, object]:
     target = Path(path) if path is not None else get_state_file("cred.yaml")
     target = target.expanduser()
-    data = _load_nested_yaml(target)
+    if not target.exists():
+        raise click.ClickException(f"Expected configuration file at {target}")
+    data = load_nested_yaml(target)
     try:
         return data["credentials"]
     except KeyError as exc:
