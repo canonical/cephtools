@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import json
 import subprocess
 import uuid
 from collections import deque
@@ -10,8 +11,10 @@ from typing import Callable, Iterable
 
 import click
 
+from cephtools.state import get_state_file
 
-DEFAULT_CONFIG_PATH = Path("~/.config/cephtools/testflinger.yaml").expanduser()
+
+DEFAULT_CONFIG_PATH = get_state_file("testflinger.yaml", ensure_parent=False)
 DEFAULT_RESERVE_FOR = 3600
 
 RESERVATION_PREFIXES = [
@@ -132,8 +135,25 @@ def _load_nested_yaml(path: Path) -> dict[str, object]:
     return root
 
 
-def read_vmaas_network_config(path: Path = Path("network.yaml")) -> dict[str, object]:
-    data = _load_nested_yaml(path)
+def read_cephtools_config(path: Path | None = None) -> dict[str, object]:
+    target = (path or get_state_file("cephtools.yaml")).expanduser()
+    if not target.exists():
+        return {}
+    data = _load_nested_yaml(target)
+    section = data.get("cephtools")
+    if section is None:
+        return data
+    if not isinstance(section, dict):
+        raise click.ClickException(
+            f"{target} has unexpected structure for the 'cephtools' section."
+        )
+    return section
+
+
+def read_vmaas_network_config(path: Path | None = None) -> dict[str, object]:
+    target = Path(path) if path is not None else get_state_file("network.yaml")
+    target = target.expanduser()
+    data = _load_nested_yaml(target)
     try:
         network = data["network"]
     except KeyError as exc:
@@ -147,8 +167,10 @@ def read_vmaas_network_config(path: Path = Path("network.yaml")) -> dict[str, ob
     return network
 
 
-def read_vmaas_cloud_config(path: Path = Path("cloud.yaml")) -> dict[str, object]:
-    data = _load_nested_yaml(path)
+def read_vmaas_cloud_config(path: Path | None = None) -> dict[str, object]:
+    target = Path(path) if path is not None else get_state_file("cloud.yaml")
+    target = target.expanduser()
+    data = _load_nested_yaml(target)
     try:
         return data["clouds"]
     except KeyError as exc:
@@ -157,8 +179,10 @@ def read_vmaas_cloud_config(path: Path = Path("cloud.yaml")) -> dict[str, object
         ) from exc
 
 
-def read_vmaas_credentials(path: Path = Path("cred.yaml")) -> dict[str, object]:
-    data = _load_nested_yaml(path)
+def read_vmaas_credentials(path: Path | None = None) -> dict[str, object]:
+    target = Path(path) if path is not None else get_state_file("cred.yaml")
+    target = target.expanduser()
+    data = _load_nested_yaml(target)
     try:
         return data["credentials"]
     except KeyError as exc:
@@ -167,7 +191,76 @@ def read_vmaas_credentials(path: Path = Path("cred.yaml")) -> dict[str, object]:
         ) from exc
 
 
+def machine_ids(count: int, offset: int = 0) -> list[str]:
+    if count <= 0:
+        raise click.ClickException("count must be a positive integer.")
+    if offset < 0:
+        raise click.ClickException("offset must be zero or a positive integer.")
+
+    clouds = read_vmaas_cloud_config()
+    if "maas-cloud" not in clouds or not isinstance(clouds["maas-cloud"], dict):
+        raise click.ClickException(
+            "cloud.yaml is missing maas-cloud configuration."
+        )
+
+    credentials = read_vmaas_credentials()
+    try:
+        cloud_creds = credentials["maas-cloud"]
+    except KeyError as exc:
+        raise click.ClickException(
+            "cred.yaml is missing maas-cloud credentials."
+        ) from exc
+
+    if not isinstance(cloud_creds, dict) or not cloud_creds:
+        raise click.ClickException(
+            "cred.yaml does not define any maas-cloud credentials."
+        )
+
+    profile, profile_details = next(iter(cloud_creds.items()))
+    if not isinstance(profile_details, dict):
+        raise click.ClickException(
+            "cred.yaml has unexpected structure for maas-cloud credentials."
+        )
+
+    read_vmaas_network_config()  # ensure file exists/valid; not directly used here.
+
+    cmd = [
+        "maas",
+        profile,
+        "machines",
+        "read",
+        "--format",
+        "json",
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.strip() if exc.stderr else "unknown error"
+        raise click.ClickException(
+            f"Failed to query MAAS machines: {stderr}"
+        ) from exc
+
+    try:
+        machines = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise click.ClickException("Failed to parse MAAS machines JSON.") from exc
+
+    if not isinstance(machines, list):
+        raise click.ClickException("Unexpected MAAS machines response format.")
+
+    if offset >= len(machines):
+        return []
+    selected = machines[offset : offset + count]
+    return [str(machine.get("system_id")) for machine in selected if machine.get("system_id")]
+
+
 def save_backend_config(path: Path, config: BackendConfig) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         f"launchpad_account: {config.launchpad_account}",

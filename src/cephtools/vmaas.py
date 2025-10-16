@@ -14,7 +14,9 @@ from ipaddress import ip_network
 from pathlib import Path
 
 import click
+from cephtools.state import get_state_file
 from cephtools.testflinger import (
+    read_cephtools_config,
     read_vmaas_cloud_config,
     read_vmaas_credentials,
     read_vmaas_network_config,
@@ -44,6 +46,51 @@ def run(cmd, check=True, shell=False, quiet=False):
         text=True,
         stdout=subprocess.PIPE,
         shell=shell,
+    )
+
+
+def _resolve_terragrunt_dir() -> Path:
+    env_path = os.getenv("CEPHTOOLS_TERRAGRUNT_DIR")
+    candidates: list[Path] = []
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+
+    config = read_cephtools_config()
+    if config:
+        raw_config_path: object = config.get("terragrunt_dir")
+        if raw_config_path is None:
+            paths_section = config.get("paths")
+            if isinstance(paths_section, dict):
+                raw_config_path = paths_section.get("terragrunt_dir")
+        if raw_config_path:
+            if not isinstance(raw_config_path, str):
+                raise click.ClickException(
+                    "Configuration value 'terragrunt_dir' must be a string path."
+                )
+            candidates.append(Path(raw_config_path).expanduser())
+
+    package_dir = Path(__file__).resolve().parents[2] / "terraform" / "maas-nodes"
+    candidates.append(package_dir)
+
+    cwd = Path.cwd()
+    parents = (cwd, *cwd.parents)
+    candidates.extend(parent / "terraform" / "maas-nodes" for parent in parents)
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.is_dir():
+            return resolved
+
+    attempted = "\n  - ".join(str(c.resolve()) for c in seen)
+    raise click.ClickException(
+        "Unable to locate terragrunt configuration directory.\n"
+        "Checked the following locations:\n"
+        f"  - {attempted}\n"
+        "Set CEPHTOOLS_TERRAGRUNT_DIR to override."
     )
 
 
@@ -303,28 +350,40 @@ def _get_lxd_vm_host_id(admin: str, vmhost: str) -> str:
 
 
 def write_cloud_yaml(ip):
-    Path("cloud.yaml").write_text(
+    cloud_path = get_state_file("cloud.yaml")
+    cloud_path.write_text(
         "clouds:\n"
         "  maas-cloud:\n"
         "    type: maas\n"
         "    auth-types: [oauth1]\n"
         f"    endpoint: http://{ip}:5240/MAAS\n"
     )
+    return cloud_path
 
 
 def write_cred_yaml(api_key):
-    Path("cred.yaml").write_text(
+    cred_path = get_state_file("cred.yaml")
+    cred_path.write_text(
         "credentials:\n"
         "  maas-cloud:\n"
         "    admin:\n"
         "      auth-type: oauth1\n"
         f"      maas-oauth: {api_key}\n"
     )
+    return cred_path
 
 
 def juju_onboard():
-    run("juju add-cloud maas-cloud cloud.yaml --client", shell=True)
-    run("juju add-credential maas-cloud -f cred.yaml --client", shell=True)
+    cloud_path = get_state_file("cloud.yaml")
+    cred_path = get_state_file("cred.yaml")
+    run(
+        f"juju add-cloud maas-cloud {shlex.quote(str(cloud_path))} --client",
+        shell=True,
+    )
+    run(
+        f"juju add-credential maas-cloud -f {shlex.quote(str(cred_path))} --client",
+        shell=True,
+    )
     time.sleep(2)
     run(
         ("juju bootstrap maas-cloud maas-controller --bootstrap-constraints "
@@ -383,11 +442,7 @@ def _create_nodes_impl(
             "network.yaml is missing the primary subnet CIDR."
         ) from exc
 
-    terragrunt_dir = Path(__file__).resolve().parents[2] / "terraform" / "maas-nodes"
-    if not terragrunt_dir.exists():
-        raise click.ClickException(
-            f"Expected terragrunt directory at {terragrunt_dir}."
-        )
+    terragrunt_dir = _resolve_terragrunt_dir()
 
     var_args = [
         f"-var {shlex.quote(f'maas_api_url={maas_api_url}')}",
@@ -542,7 +597,8 @@ def configure_network(ctx):
             "",
         ]
     )
-    Path("network.yaml").write_text(network_yaml)
+    network_path = get_state_file("network.yaml")
+    network_path.write_text(network_yaml)
     click.echo("network.yaml written with current network configuration.")
 
 
