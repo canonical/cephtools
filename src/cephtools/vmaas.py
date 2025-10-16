@@ -609,13 +609,15 @@ def configure_network(ctx):
 @click.option(
     "--vm-data-disk-size",
     type=int,
-    required=True,
+    default=8,
+    show_default=True,
     help="Size in GB for each data disk attached to the VMs.",
 )
 @click.option(
     "--vm-data-disk-count",
     type=int,
-    required=True,
+    default=1,
+    show_default=True,
     help="Number of data disks to attach to each VM.",
 )
 @click.pass_context
