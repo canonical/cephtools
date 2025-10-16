@@ -17,6 +17,7 @@ resource "juju_application" "microceph" {
     channel  = var.channel
     revision = var.revision
   }
-  units  = var.units
-  config = var.config
+  units     = length(var.placements) > 0 ? length(var.placements) : var.units
+  config    = var.config
+  placement = length(var.placements) > 0 ? var.placements : null
 }

@@ -51,6 +51,7 @@ terraform apply -var="model=<MODEL_NAME>"
 | channel | Channel that the charm is deployed from | `string` | `"squid/stable"` | no |
 | config | Map of the charm configuration options | `map(string)` | `{}` | no |
 | revision | Revision number of the charm | `number` | `null` | no |
+| placements | Optional list of Juju placement targets (e.g. machine IDs) | `list(string)` | `[]` | no |
 | units | Unit count/scale | `number` | `1` | no |
 
 ## Outputs

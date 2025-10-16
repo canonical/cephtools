@@ -34,3 +34,8 @@ variable "units" {
   type        = number
   default     = 1
 }
+
+variable "placements" {
+  description = "Optional list of Juju placement targets (e.g. machine IDs) to deploy onto."
+  type        = list(string)
+  default     = []
