@@ -229,8 +229,7 @@ def machine_ids(count: int, offset: int = 0) -> list[str]:
         profile,
         "machines",
         "read",
-        "--format",
-        "json",
+        "--format=json",
     ]
     try:
         result = subprocess.run(
