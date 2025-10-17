@@ -31,6 +31,7 @@ DEFAULTS = DEFAULT_VMAAS_DEFAULTS.copy()
 
 TERRAGRUNT_VERSION = "v0.89.3"
 CEPHTOOLS_TAG = "cephtools"
+CEPHTOOLS_MODEL = "cephtools"
 
 
 def run(cmd, check=True, shell=False, quiet=False):
@@ -157,7 +158,7 @@ def _tag_maas_machines(admin: str, hostnames: list[str], tag: str) -> None:
         if not system_id:
             missing.append(hostname)
             continue
-        run(f"maas {admin} machine update {system_id} add_tag={tag}")
+        run(f"maas {admin} tag update-nodes {tag} add={system_id}")
 
     if missing:
         click.echo(
@@ -165,6 +166,28 @@ def _tag_maas_machines(admin: str, hostnames: list[str], tag: str) -> None:
             + ", ".join(sorted(missing)),
             err=True,
         )
+
+
+def _ensure_juju_model(model: str, *, constraint: str) -> None:
+    result = run("juju models --format json")
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
+        raise click.ClickException(
+            "Failed to parse Juju models output as JSON."
+        ) from exc
+
+    models = payload.get("models")
+    if not isinstance(models, list):
+        models = []
+
+    existing = any(
+        isinstance(entry, dict) and entry.get("name") == model for entry in models
+    )
+    if not existing:
+        run(f"juju add-model {model}")
+
+    run(f"juju set-model-constraints {model} {constraint}")
 
 
 def primary_ip() -> str:
@@ -724,30 +747,36 @@ def juju_init(ctx):
 
 @cli.command(
     "install",
-    help="Run all installation steps: install-deps, lxd-init, maas-init, register-vm-host, configure-network, juju-init.",
+    help="Run all installation steps: install-deps, lxd-init, maas-init, register-vm-host, configure-network, juju-init, create-model.",
 )
 @click.pass_context
 def install(ctx):
     """Run all vmaas installation steps in sequence."""
     click.echo("Starting full vmaas installation...")
 
-    click.echo("\n=== Step 1/6: Installing dependencies ===")
+    click.echo("\n=== Step 1/7: Installing dependencies ===")
     ctx.invoke(install_deps)
 
-    click.echo("\n=== Step 2/6: Initializing LXD ===")
+    click.echo("\n=== Step 2/7: Initializing LXD ===")
     ctx.invoke(lxd_init_cmd)
 
-    click.echo("\n=== Step 3/6: Initializing MAAS ===")
+    click.echo("\n=== Step 3/7: Initializing MAAS ===")
     ctx.invoke(maas_init_cmd)
 
-    click.echo("\n=== Step 4/6: Registering VM host ===")
+    click.echo("\n=== Step 4/7: Registering VM host ===")
     ctx.invoke(register_vm_host)
 
-    click.echo("\n=== Step 5/6: Configuring network ===")
+    click.echo("\n=== Step 5/7: Configuring network ===")
     ctx.invoke(configure_network)
 
-    click.echo("\n=== Step 6/6: Initializing Juju ===")
+    click.echo("\n=== Step 6/7: Initializing Juju ===")
     ctx.invoke(juju_init)
+
+    click.echo("\n=== Step 7/7: Creating Juju model ===")
+    _ensure_juju_model(CEPHTOOLS_MODEL, constraint=f"tags={CEPHTOOLS_TAG}")
+    click.echo(
+        f"Juju model '{CEPHTOOLS_MODEL}' ensured with constraint tags={CEPHTOOLS_TAG}."
+    )
 
     click.echo("\n=== Installation complete! ===")
     click.echo(f"MAAS URL: {ctx.obj['maas_url']}")

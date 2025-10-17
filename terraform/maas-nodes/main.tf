@@ -28,20 +28,4 @@ resource "maas_vm_host_machine" "vms" {
   }
 
 }
-
-# 2) Deploy them (OS + cloud-init)
-resource "maas_instance" "vms" {
-  count = var.vm_count
-
-  allocate_params {
-    hostname = maas_vm_host_machine.vms[count.index].hostname
-  }
-
-  deploy_params {
-    distro_series = var.distro_series
-    user_data     = file("${path.module}/cloud-init.yml")
-  }
-}
-
 output "vm_hostnames"     { value = [for m in maas_vm_host_machine.vms : m.hostname] }
-output "vm_ip_addresses"  { value = [for i in maas_instance.vms : i.ip_addresses] }
