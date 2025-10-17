@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 
 STATE_ENV_VAR = "CEPHTOOLS_STATE_HOME"
-_DEFAULT_STATE_HOME = Path("~/.local/share/cephtools")
 
 
 def default_state_home() -> Path:
@@ -12,7 +11,11 @@ def default_state_home() -> Path:
     configured = os.getenv(STATE_ENV_VAR)
     if configured:
         return Path(configured).expanduser()
-    return _DEFAULT_STATE_HOME.expanduser()
+    preferred_root = Path("~/src/cephtools").expanduser()
+    if preferred_root.exists():
+        return (preferred_root / "state").expanduser()
+    fallback_root = Path("~/cephtools").expanduser()
+    return (fallback_root / "state").expanduser()
 
 
 def ensure_state_dir() -> Path:
