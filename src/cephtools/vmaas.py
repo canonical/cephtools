@@ -19,6 +19,7 @@ from cephtools.config import (
     read_cephtools_config,
 )
 from cephtools.state import get_state_file
+from cephtools.terraform import terraform_root_candidates
 from cephtools.testflinger import (
     read_vmaas_cloud_config,
     read_vmaas_credentials,
@@ -29,6 +30,7 @@ from cephtools.testflinger import (
 DEFAULTS = DEFAULT_VMAAS_DEFAULTS.copy()
 
 TERRAGRUNT_VERSION = "v0.89.3"
+CEPHTOOLS_TAG = "cephtools"
 
 
 def run(cmd, check=True, shell=False, quiet=False):
@@ -65,12 +67,8 @@ def _resolve_terragrunt_dir() -> Path:
                 )
             candidates.append(Path(raw_config_path).expanduser())
 
-    package_dir = Path(__file__).resolve().parents[2] / "terraform" / "maas-nodes"
-    candidates.append(package_dir)
-
-    cwd = Path.cwd()
-    parents = (cwd, *cwd.parents)
-    candidates.extend(parent / "terraform" / "maas-nodes" for parent in parents)
+    for root_candidate in terraform_root_candidates():
+        candidates.append(Path(root_candidate).expanduser() / "maas-nodes")
 
     seen: set[Path] = set()
     for candidate in candidates:
@@ -88,6 +86,85 @@ def _resolve_terragrunt_dir() -> Path:
         f"  - {attempted}\n"
         "Set CEPHTOOLS_TERRAGRUNT_DIR to override."
     )
+
+
+def _terragrunt_vm_hostnames(terragrunt_dir: Path) -> list[str]:
+    result = run(
+        f"cd {shlex.quote(str(terragrunt_dir))} && terragrunt output -json",
+        shell=True,
+    )
+    try:
+        outputs = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
+        raise click.ClickException(
+            "Failed to parse terragrunt outputs as JSON."
+        ) from exc
+
+    hostnames_value = outputs.get("vm_hostnames")
+    if not isinstance(hostnames_value, dict) or "value" not in hostnames_value:
+        raise click.ClickException(
+            "Terragrunt outputs did not include vm_hostnames."
+        )
+
+    hostnames = hostnames_value["value"]
+    if not isinstance(hostnames, list):
+        raise click.ClickException(
+            "Terragrunt vm_hostnames output must be a list."
+        )
+
+    return [str(hostname) for hostname in hostnames]
+
+
+def _ensure_maas_tag(admin: str, tag: str) -> None:
+    result = run(f"maas {admin} tags read")
+    try:
+        tags = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
+        raise click.ClickException(
+            "Failed to parse MAAS tags output as JSON."
+        ) from exc
+
+    for entry in tags:
+        if isinstance(entry, dict) and entry.get("name") == tag:
+            return
+
+    run(f"maas {admin} tags create name={tag}")
+
+
+def _tag_maas_machines(admin: str, hostnames: list[str], tag: str) -> None:
+    if not hostnames:
+        return
+
+    result = run(f"maas {admin} machines read")
+    try:
+        machines = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
+        raise click.ClickException(
+            "Failed to parse MAAS machines output as JSON."
+        ) from exc
+
+    hostname_to_system_id = {
+        str(machine.get("hostname")): machine.get("system_id")
+        for machine in machines
+        if isinstance(machine, dict)
+        and machine.get("hostname")
+        and machine.get("system_id")
+    }
+
+    missing: list[str] = []
+    for hostname in hostnames:
+        system_id = hostname_to_system_id.get(hostname)
+        if not system_id:
+            missing.append(hostname)
+            continue
+        run(f"maas {admin} machine update {system_id} add_tag={tag}")
+
+    if missing:
+        click.echo(
+            "Warning: Unable to tag machines not found in MAAS: "
+            + ", ".join(sorted(missing)),
+            err=True,
+        )
 
 
 def primary_ip() -> str:
@@ -453,6 +530,10 @@ def _create_nodes_impl(
         f"cd {shlex.quote(str(terragrunt_dir))} && {terragrunt_cmd}",
         shell=True,
     )
+
+    hostnames = _terragrunt_vm_hostnames(terragrunt_dir)
+    _ensure_maas_tag(ctx_obj["admin"], CEPHTOOLS_TAG)
+    _tag_maas_machines(ctx_obj["admin"], hostnames, CEPHTOOLS_TAG)
 
 
 # ---- click CLI ------------------------------------------------------------
