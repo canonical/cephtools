@@ -19,7 +19,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@d5f39331a73d5042e70ab770463dff632e20c127
+      - uses: astral-sh/setup-uv@2ddd2b9cb38ad8efd50337e8ab201519a34c9f24 # v7.1.1
       - uses: extractions/setup-just@v3
       - name: Sync dependencies
         run: just sync
