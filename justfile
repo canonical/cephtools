@@ -23,5 +23,5 @@ unittest *ARGS:
 	UV_CACHE_DIR=.uv-cache {{UV}} run pytest {{ARGS}}
 
 # Build a standalone PEX installer
-build-pex OUTPUT="dist/cephtools.pex":
+build-pex OUTPUT="dist/cephtools":
 	scripts/build_pex.sh {{OUTPUT}}

@@ -22,7 +22,7 @@ jobs:
       - name: Sync dependencies
         run: just sync
       - name: Build PEX
-        run: just build-pex
+        run: just build-pex dist/cephtools
       - name: Collect metadata
         run: |
           echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
