@@ -30,11 +30,11 @@ jobs:
         uses: ncipollo/release-action@b7eabc95ff50cbeeedec83973935c8f306dfcd0b
         with:
           tag: latest
-          releaseName: Latest (build ${{ github.run_number }})
-          body: Automated release for commit ${{ github.sha }} (${ env.SHORT_SHA }).
+          name: Latest (build ${{ github.run_number }})
+          body: Automated release for commit ${{ github.sha }}
           draft: false
           prerelease: false
           allowUpdates: true
-          files: dist/cephtools
+          artifacts: dist/cephtools
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
