@@ -26,7 +26,7 @@ variable "vm_prefix" {
 
 variable "vm_cores" {
   type    = number
-  default = 4
+  default = 1
 }
 
 variable "vm_memory" {
