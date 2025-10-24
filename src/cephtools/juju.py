@@ -100,7 +100,7 @@ def _wait_for_model_active(model: str, *, timeout: int) -> None:
     if timeout <= 0:
         raise click.ClickException("--wait-timeout must be a positive integer.")
 
-    juju = jubilant.Juju(model=f"{MAAS_CONTROLLER}:{model}")
+    juju = jubilant.Juju(model=f"{model}")
     click.echo(
         f"Waiting for applications in model '{model}' to become active "
         f"(timeout {timeout}s)..."
