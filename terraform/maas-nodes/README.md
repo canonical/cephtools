@@ -10,6 +10,8 @@ export TF_VAR_maas_api_key="<your MAAS API key>"
 maas <profile> vm-hosts read | jq -r '.[]|[.id,.name]'
 
 export TF_VAR_lxd_vm_host_id="<id of local-lxd>"
+export TF_VAR_primary_subnet_cidr="<primary CIDR, e.g. 10.241.1.0/24>"
+export TF_VAR_external_subnet_cidr="<external CIDR, e.g. 10.250.0.0/24>"
 
 terraform init
 terraform apply
@@ -30,5 +32,6 @@ terragrunt apply \
   -var 'lxd_vm_host_id=<id of local-lxd>' \
   -var 'vm_data_disk_size=64' \
   -var 'vm_data_disk_count=2' \
-  -var 'primary_subnet_cidr=10.241.1.0/24'
+  -var 'primary_subnet_cidr=10.241.1.0/24' \
+  -var 'external_subnet_cidr=10.250.0.0/24'
 ```

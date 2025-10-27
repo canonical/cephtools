@@ -53,6 +53,10 @@ variable "primary_subnet_cidr" {
   type    = string
 }
 
+variable "external_subnet_cidr" {
+  type = string
+}
+
 # OS
 variable "distro_series" {
   type    = string

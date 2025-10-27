@@ -10,7 +10,7 @@ import socket
 import subprocess
 import sys
 import time
-from ipaddress import ip_network
+from ipaddress import ip_interface, ip_network
 from pathlib import Path
 
 import click
@@ -34,6 +34,9 @@ TERRAGRUNT_VERSION = "v0.89.3"
 CEPHTOOLS_TAG = DEFAULTS["maas_tag"]
 CEPHTOOLS_MODEL = load_cephtools_config(ensure=True)["juju_model"]
 MAAS_CONTROLLER = "maas-controller"
+EXT_LXD_NETWORK = "ext"
+EXTERNAL_SPACE_NAME = "external"
+JUJU_SPACE_NAME = "jujuspace"
 
 
 def run(cmd, check=True, shell=False, quiet=False):
@@ -318,6 +321,17 @@ def lxd_ready():
         print(e.stderr)
 
 
+def ensure_lxd_network(name: str, *, ipv4_address: str | None = None) -> None:
+    nets = json.loads(run("lxc query /1.0/networks").stdout)
+    if f"/1.0/networks/{name}" in nets:
+        return
+
+    address_arg = ipv4_address if ipv4_address else "auto"
+    run(
+        f"lxc network create {name} ipv4.address={address_arg} ipv4.nat=true ipv6.address=none"
+    )
+
+
 def lxd_init_impl(ip, admin_pw, lxdbridge):
     run("sudo snap set lxd daemon.user.group=adm")
     run(
@@ -328,6 +342,7 @@ def lxd_init_impl(ip, admin_pw, lxdbridge):
     run("lxc config set core.https_address :8443 || true", shell=True)
     for k, v in [("dns.mode", "none"), ("ipv4.dhcp", "false"), ("ipv6.dhcp", "false")]:
         run(f"lxc network set {lxdbridge} {k}={v} || true", shell=True)
+    ensure_lxd_network(EXT_LXD_NETWORK)
     time.sleep(2)
 
 
@@ -344,6 +359,9 @@ def verify_lxd(lxdbridge):
     net = json.loads(run(f"lxc query /1.0/networks/{lxdbridge}").stdout)
     if net.get("managed") is not True:
         raise RuntimeError(f"Network {lxdbridge} is not managed")
+    ext_net = json.loads(run(f"lxc query /1.0/networks/{EXT_LXD_NETWORK}").stdout)
+    if ext_net.get("managed") is not True:
+        raise RuntimeError(f"Network {EXT_LXD_NETWORK} is not managed")
 
 
 def maas_init_impl(maas_url, admin, admin_pw, admin_mail):
@@ -442,6 +460,17 @@ def route_info(lxdbridge):
     raise RuntimeError(f"could not derive CIDR or gateway from routes: {routes}")
 
 
+def lxd_network_cidr_and_gateway(network_name: str) -> tuple[str, str]:
+    net = json.loads(run(f"lxc query /1.0/networks/{network_name}").stdout)
+    config = net.get("config") or {}
+    ipv4_address = config.get("ipv4.address")
+    if not ipv4_address or ipv4_address.lower() == "none":
+        raise RuntimeError(f"LXD network {network_name} lacks an IPv4 address")
+    iface = ip_interface(ipv4_address)
+    cidr = iface.network.with_prefixlen
+    return str(cidr), str(iface.ip)
+
+
 def maas_subnet_ids(admin, cidr):
     subnets = json.loads(run(f"maas {admin} subnets read").stdout)
     sid = next((s["id"] for s in subnets if s.get("cidr") == cidr), None)
@@ -480,9 +509,14 @@ def enable_vlan_dhcp(admin, fabric_id, vlan_id, rack_sysid):
 
 
 def create_space(admin, space_name):
+    spaces = json.loads(run(f"maas {admin} spaces read").stdout)
+    space_id = next((s["id"] for s in spaces if s.get("name") == space_name), None)
+    if space_id is not None:
+        return space_id
+
     run(f'maas {admin} spaces create name="{space_name}"')
-    space_id = json.loads(run(f"maas {admin} spaces read").stdout)
-    space_id = next((s["id"] for s in space_id if s.get("name") == space_name), None)
+    spaces = json.loads(run(f"maas {admin} spaces read").stdout)
+    space_id = next((s["id"] for s in spaces if s.get("name") == space_name), None)
     if space_id is None:
         raise RuntimeError(f"MAAS space '{space_name}' not found after creation")
     return space_id
@@ -559,8 +593,8 @@ def juju_onboard():
         juju.bootstrap(
             "maas-cloud",
             MAAS_CONTROLLER,
-            bootstrap_constraints={"spaces": "jujuspace"},
-            config={"juju-mgmt-space": "jujuspace"},
+            bootstrap_constraints={"spaces": JUJU_SPACE_NAME},
+            config={"juju-mgmt-space": JUJU_SPACE_NAME},
         )
         juju.cli("switch", MAAS_CONTROLLER, include_model=False)
     except jubilant.CLIError as exc:
@@ -628,6 +662,17 @@ def _create_nodes_impl(
         raise click.ClickException(
             "network.yaml is missing the primary subnet CIDR."
         ) from exc
+    external_section = network.get("external")
+    if not isinstance(external_section, dict):
+        raise click.ClickException(
+            "network.yaml is missing the external network configuration."
+        )
+    try:
+        external_subnet_cidr = external_section["cidr"]
+    except KeyError as exc:
+        raise click.ClickException(
+            "network.yaml is missing the external subnet CIDR."
+        ) from exc
 
     terragrunt_dir = _resolve_terragrunt_dir()
 
@@ -639,6 +684,7 @@ def _create_nodes_impl(
         f"-var {shlex.quote(f'vm_data_disk_count={vm_data_disk_count}')}",
         f"-var {shlex.quote(f'vm_count={vm_count}')}",
         f"-var {shlex.quote(f'primary_subnet_cidr={primary_subnet_cidr}')}",
+        f"-var {shlex.quote(f'external_subnet_cidr={external_subnet_cidr}')}",
     ]
     terragrunt_args = [
         "terragrunt",
@@ -777,9 +823,18 @@ def configure_network(ctx):
     start_ip, end_ip = create_dynamic_iprange(ctx.obj["admin"], sid, cidr)
     enable_vlan_dhcp(ctx.obj["admin"], fabric_id, vlan_id, rack_sysid)
     click.echo(f"network configured on {ctx.obj['lxdbridge']} ({cidr}, gw {gw}).")
-    space_id = create_space(ctx.obj["admin"], "jujuspace")
+    space_id = create_space(ctx.obj["admin"], JUJU_SPACE_NAME)
     assign_space_to_vlan(ctx.obj["admin"], fabric_id, vlan_id, space_id)
-    click.echo(f"space 'jujuspace' ({space_id}) created and assigned to VLAN.")
+    click.echo(f"space '{JUJU_SPACE_NAME}' ({space_id}) created and assigned to VLAN.")
+    ext_cidr, ext_gw = lxd_network_cidr_and_gateway(EXT_LXD_NETWORK)
+    ext_sid, ext_fabric_id, ext_vlan_id, ext_rack_sysid = maas_subnet_ids(ctx.obj["admin"], ext_cidr)
+    update_subnet_gateway(ctx.obj["admin"], ext_sid, ext_gw)
+    ext_start_ip, ext_end_ip = create_dynamic_iprange(ctx.obj["admin"], ext_sid, ext_cidr)
+    enable_vlan_dhcp(ctx.obj["admin"], ext_fabric_id, ext_vlan_id, ext_rack_sysid)
+    click.echo(f"network configured on {EXT_LXD_NETWORK} ({ext_cidr}, gw {ext_gw}).")
+    ext_space_id = create_space(ctx.obj["admin"], EXTERNAL_SPACE_NAME)
+    assign_space_to_vlan(ctx.obj["admin"], ext_fabric_id, ext_vlan_id, ext_space_id)
+    click.echo(f"space '{EXTERNAL_SPACE_NAME}' ({ext_space_id}) created and assigned to VLAN.")
     network_yaml = "\n".join(
         [
             "network:",
@@ -794,6 +849,18 @@ def configure_network(ctx):
             f"  vlan_id: {vlan_id}",
             f"  rack_sysid: {rack_sysid}",
             f"  space_id: {space_id}",
+            "  external:",
+            f"    bridge: {EXT_LXD_NETWORK}",
+            f"    cidr: {ext_cidr}",
+            f"    gateway: {ext_gw}",
+            "    dynamic_range:",
+            f"      start: {ext_start_ip}",
+            f"      end: {ext_end_ip}",
+            f"    subnet_id: {ext_sid}",
+            f"    fabric_id: {ext_fabric_id}",
+            f"    vlan_id: {ext_vlan_id}",
+            f"    rack_sysid: {ext_rack_sysid}",
+            f"    space_id: {ext_space_id}",
             "",
         ]
     )

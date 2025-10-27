@@ -27,5 +27,16 @@ resource "maas_vm_host_machine" "vms" {
     }
   }
 
+  network_interfaces {
+    name        = "eth0"
+    subnet_cidr = data.maas_subnet.primary.cidr
+    fabric      = data.maas_subnet.primary.fabric
+  }
+
+  network_interfaces {
+    name        = "eth1"
+    subnet_cidr = data.maas_subnet.external.cidr
+    fabric      = data.maas_subnet.external.fabric
+  }
 }
 output "vm_hostnames"     { value = [for m in maas_vm_host_machine.vms : m.hostname] }

@@ -12,3 +12,4 @@ wheels/
 *.egg-info
 /state
 .venv
+/.rustup
