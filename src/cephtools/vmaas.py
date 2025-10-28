@@ -569,58 +569,146 @@ def write_cred_yaml(api_key):
     return cred_path
 
 
-def juju_onboard():
+def _juju_cloud_exists(juju: jubilant.Juju, cloud_name: str) -> bool:
+    clouds_output = juju.cli(
+        "clouds",
+        "--client",
+        "--format",
+        "json",
+        include_model=False,
+    )
+    payload = json.loads(clouds_output or "{}")
+    clouds_section = payload.get("clouds")
+    if isinstance(clouds_section, dict):
+        return cloud_name in clouds_section
+    if isinstance(payload, dict):
+        return cloud_name in payload
+    return False
+
+
+def _juju_credential_exists(
+    juju: jubilant.Juju, cloud_name: str, credential_name: str
+) -> bool:
+    creds_output = juju.cli(
+        "credentials",
+        "--client",
+        "--format",
+        "json",
+        include_model=False,
+    )
+    payload = json.loads(creds_output or "{}")
+    credentials = payload.get("credentials")
+    if not isinstance(credentials, dict):
+        return False
+    cloud_credentials = credentials.get(cloud_name)
+    if not isinstance(cloud_credentials, dict):
+        return False
+    return credential_name in cloud_credentials
+
+
+def _juju_controller_exists(juju: jubilant.Juju, controller_name: str) -> bool:
+    controllers_output = juju.cli(
+        "controllers",
+        "--format",
+        "json",
+        include_model=False,
+    )
+    payload = json.loads(controllers_output or "{}")
+    controllers = payload.get("controllers")
+    return isinstance(controllers, dict) and controller_name in controllers
+
+
+def _wait_for_controller_ready(juju: jubilant.Juju) -> None:
+    time.sleep(10)
+    for _ in range(20):
+        controllers_output = juju.cli(
+            "controllers",
+            "--format",
+            "json",
+            include_model=False,
+        )
+        payload = json.loads(controllers_output or "{}")
+        total_ctrl_machines = sum(
+            controller.get("controller-machines", {}).get("Total", 0)
+            for controller in payload.get("controllers", {}).values()
+            if isinstance(controller, dict)
+        )
+        if total_ctrl_machines > 0:
+            return
+        time.sleep(6)
+
+    raise click.ClickException("juju controller machines not ready after timeout")
+
+
+def juju_onboard() -> bool:
     cloud_path = get_state_file("cloud.yaml")
     cred_path = get_state_file("cred.yaml")
     juju = jubilant.Juju()
-    try:
-        juju.cli(
-            "add-cloud",
-            "maas-cloud",
-            str(cloud_path),
-            "--client",
-            include_model=False,
-        )
-        juju.cli(
-            "add-credential",
-            "maas-cloud",
-            "-f",
-            str(cred_path),
-            "--client",
-            include_model=False,
-        )
-        time.sleep(2)
+    if not _juju_cloud_exists(juju, "maas-cloud"):
+        click.echo("Registering Juju cloud 'maas-cloud'.")
+        try:
+            juju.cli(
+                "add-cloud",
+                "maas-cloud",
+                str(cloud_path),
+                "--client",
+                include_model=False,
+            )
+        except jubilant.CLIError as exc:
+            if not _is_already_exists_error(exc):
+                raise
+            click.echo("Juju reports cloud already exists; continuing.")
+    else:
+        click.echo("Juju cloud 'maas-cloud' already registered; skipping.")
+
+    if not _juju_credential_exists(juju, "maas-cloud", "admin"):
+        click.echo("Adding Juju credential 'admin' for cloud 'maas-cloud'.")
+        try:
+            juju.cli(
+                "add-credential",
+                "maas-cloud",
+                "-f",
+                str(cred_path),
+                "--client",
+                include_model=False,
+            )
+        except jubilant.CLIError as exc:
+            if not _is_already_exists_error(exc):
+                raise
+            click.echo("Juju reports credential already exists; continuing.")
+    else:
+        click.echo("Juju credential 'admin' already present; skipping.")
+
+    time.sleep(2)
+
+    bootstrapped = False
+    if not _juju_controller_exists(juju, MAAS_CONTROLLER):
+        click.echo(f"Bootstrapping Juju controller '{MAAS_CONTROLLER}'.")
         juju.bootstrap(
             "maas-cloud",
             MAAS_CONTROLLER,
             bootstrap_constraints={"spaces": JUJU_SPACE_NAME},
             config={"juju-mgmt-space": JUJU_SPACE_NAME},
         )
-        juju.cli("switch", MAAS_CONTROLLER, include_model=False)
-    except jubilant.CLIError as exc:
-        message = _format_juju_error(exc)
-        raise click.ClickException(
-            f"Failed to bootstrap Juju controller: {message}"
-        ) from exc
+        bootstrapped = True
+    else:
+        click.echo(
+            f"Juju controller '{MAAS_CONTROLLER}' already exists; skipping bootstrap."
+        )
 
-    time.sleep(10)
-    # poll controller status until ready
-    for _ in range(20):
-        controllers_json = juju.cli(
-            "controllers",
-            "--format",
-            "json",
-            include_model=False,
-        )
-        js = json.loads(controllers_json or "{}")
-        total_ctrl_machines = sum(
-            c.get("controller-machines", {}).get("Total", 0)
-            for c in js.get("controllers", {}).values()
-        )
-        if total_ctrl_machines > 0:
-            return
-        time.sleep(6)
-    raise Exception("juju controller machines not ready after timeout")
+    click.echo(f"Switching to Juju controller '{MAAS_CONTROLLER}'.")
+    juju.cli("switch", MAAS_CONTROLLER, include_model=False)
+
+    if bootstrapped:
+        click.echo("Waiting for controller machines to report ready status.")
+        _wait_for_controller_ready(juju)
+
+    return bootstrapped
+
+
+def _is_already_exists_error(exc: jubilant.CLIError) -> bool:
+    message = _format_juju_error(exc).lower()
+    return "already exists" in message
 
 
 def _create_nodes_impl(
@@ -920,8 +1008,11 @@ def juju_init(ctx):
     ensure_snap("juju")
     api_key = maas_api_key(ctx.obj["admin"])
     write_cred_yaml(api_key)
-    juju_onboard()
-    click.echo("juju initialized and controller bootstrapped.")
+    bootstrapped = juju_onboard()
+    if bootstrapped:
+        click.echo("juju initialized and controller bootstrapped.")
+    else:
+        click.echo("juju already initialized.")
 
 
 @cli.command(
