@@ -29,21 +29,8 @@ Below are the individual steps:
 - `cephtools vmaas ensure-nodes`: reconciles the VM inventory via Terragrunt; override the number of VMs and attached data disks with `--vm-count`, `--vm-data-disk-count`, and `--vm-data-disk-size`.
 - `cephtools vmaas juju-init`: verifies MAAS/LXD health, installs Juju, writes credentials, onboards the cloud, and bootstraps the controller.
 
-Set `CEPHTOOLS_TERRAGRUNT_DIR` or the `terragrunt_dir` key in `cephtools.yaml` to point at your Terragrunt plans if they live outside the repository.
-
-## Juju helpers (`cephtools juju`)
-
-The Juju command group wraps Terragrunt plans that target existing Juju models.
-
-- `cephtools juju deploy --plan microceph` applies the `terraform/microceph` Terragrunt plan. By default it deploys three units into the model defined by `juju_model` in `cephtools.yaml`. 
-
-Override behaviour with:
-
-  - `--model` to pick a different Juju model.
-  - `--units`, `--charm-channel`, `--charm-revision`, `--base`, `--snap-channel` to pass variables into the plan.
-  - `--no-wait` or `--wait-timeout` to control post-deploy readiness checks.
-
-Ensure `terragrunt` is installed (the `cephtools vmaas install-deps | install` commands above do this).
+Set `CEPHTOOLS_TERRAGRUNT_DIR` or the `terragrunt_dir` key in `cephtools.yaml` to point at your Terragrunt plans if they live outside the repository. The MicroCeph Terragrunt/Terraform module now lives in the
+[charm-microceph](https://github.com/canonical/charm-microceph/tree/main/terraform/microceph) repository.
 
 ## MicroCeph helpers (`cephtools microceph`)
 
