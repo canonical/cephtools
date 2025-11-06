@@ -3,9 +3,7 @@
 
 import json
 import os
-import platform
 import shlex
-import shutil
 import socket
 import subprocess
 import sys
@@ -15,12 +13,13 @@ from pathlib import Path
 
 import click
 import jubilant
+from cephtools.common import ensure_snap, run
 from cephtools.config import (
     load_cephtools_config,
     load_vmaas_defaults,
 )
 from cephtools.state import get_state_file
-from cephtools.terraform import terraform_root_candidates
+from cephtools.terraform import ensure_terragrunt, terraform_root_candidates
 from cephtools.testflinger import (
     read_vmaas_cloud_config,
     read_vmaas_credentials,
@@ -30,27 +29,12 @@ from cephtools.testflinger import (
 # ---- defaults from configuration -----------------------------------------
 DEFAULTS = load_vmaas_defaults()
 
-TERRAGRUNT_VERSION = "v0.89.3"
 CEPHTOOLS_TAG = DEFAULTS["maas_tag"]
 CEPHTOOLS_MODEL = load_cephtools_config(ensure=True)["juju_model"]
 MAAS_CONTROLLER = "maas-controller"
 EXT_LXD_NETWORK = "ext"
 EXTERNAL_SPACE_NAME = "external"
 JUJU_SPACE_NAME = "jujuspace"
-
-
-def run(cmd, check=True, shell=False, quiet=False):
-    if not quiet:
-        print(f"+ {cmd}")
-    if not shell:
-        cmd = shlex.split(cmd)
-    return subprocess.run(
-        cmd,
-        check=check,
-        text=True,
-        stdout=subprocess.PIPE,
-        shell=shell,
-    )
 
 
 def _format_juju_error(exc: jubilant.CLIError) -> str:
@@ -269,49 +253,6 @@ def primary_ip() -> str:
     except Exception:
         out = run("hostname -I", check=True)
         return out.stdout.strip().split()[0]
-
-
-def ensure_snap(name, channel=None, classic=False):
-    out = run("snap list", check=True)
-    if any(line.split()[0] == name for line in out.stdout.splitlines()[1:]):
-        return
-    parts = ["sudo", "snap", "install", name]
-    if channel:
-        parts.append(f"--channel={channel}")
-    if classic:
-        parts.append("--classic")
-    run(" ".join(parts))
-
-
-def ensure_terragrunt(version=TERRAGRUNT_VERSION, bin_dir="/usr/local/bin"):
-    bin_path = Path(bin_dir) / "terragrunt"
-    if bin_path.exists() or shutil.which("terragrunt"):
-        return
-
-    system = platform.system().lower()
-    if not system.startswith("linux"):
-        raise RuntimeError("Terragrunt installer currently supports only Linux hosts")
-    system = "linux"
-
-    machine = platform.machine().lower()
-    arch_map = {
-        "x86_64": "amd64",
-        "amd64": "amd64",
-        "aarch64": "arm64",
-        "arm64": "arm64",
-    }
-    arch = arch_map.get(machine)
-    if arch is None:
-        raise RuntimeError(f"Unsupported architecture for terragrunt: {platform.machine()}")
-
-    terragrunt_bin = f"terragrunt_{system}_{arch}"
-    terragrunt_url = (
-        f"https://github.com/gruntwork-io/terragrunt/releases/download/{version}/{terragrunt_bin}"
-    )
-
-    run(f"curl -fsSL -o {terragrunt_bin} {terragrunt_url}")
-    run(f"chmod +x {terragrunt_bin}")
-    run(f"sudo mv {terragrunt_bin} {bin_path}")
 
 
 def lxd_ready():
