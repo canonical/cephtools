@@ -445,14 +445,35 @@ def register_lxd_vmhost_impl(admin, vmhost, ip, admin_pw):
 
 
 def extract_arches(resources):
-    """
-    Return the unique CPU arches from MAAS boot-resources JSON.
-    Looks at the 'architecture' field and takes the part before '/'.
-    """
-    arches = set()
+    """Return the syncd arches from MAAS boot-resources JSON."""
+
+    ready_arches: set[str] = set()
     for item in resources:
-        arches.add(item.get("architecture"))
-    return arches
+        if not isinstance(item, dict):
+            continue
+
+        if item.get("type") != "Synced":
+            continue
+
+        architecture = item.get("architecture")
+        if not architecture:
+            continue
+
+        architecture_str = str(architecture)
+        ready_arches.add(architecture_str)
+
+        base_arch, _, _subarch = architecture_str.partition("/")
+        if not base_arch:
+            continue
+
+        subarches = item.get("subarches")
+        if isinstance(subarches, str):
+            for subarch in subarches.split(","):
+                subarch = subarch.strip()
+                if subarch:
+                    ready_arches.add(f"{base_arch}/{subarch}")
+
+    return ready_arches
 
 
 def import_boot_resources(admin):
