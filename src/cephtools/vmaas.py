@@ -364,7 +364,21 @@ def verify_lxd(lxdbridge):
         raise RuntimeError(f"Network {EXT_LXD_NETWORK} is not managed")
 
 
+def _maas_is_initialized() -> bool:
+    status = run("sudo maas status", check=False, quiet=True)
+    if status.returncode != 0:
+        return False
+    output = (status.stdout or "").strip().lower()
+    if "maas is not running" in output or "maas is not initialised" in output:
+        return False
+    return True
+
+
 def maas_init_impl(maas_url, admin, admin_pw, admin_mail):
+    already_initialized = _maas_is_initialized()
+    if already_initialized:
+        print("MAAS already initialized; skipping 'maas init'")
+        return
     try:
         run(
             "sudo maas init region+rack --database-uri maas-test-db:/// "
@@ -405,6 +419,15 @@ def verify_maas(admin):
 
 
 def register_lxd_vmhost_impl(admin, vmhost, ip, admin_pw):
+    try:
+        existing_id = _get_lxd_vm_host_id(admin, vmhost)
+    except click.ClickException:
+        existing_id = None
+    if existing_id is not None:
+        click.echo(
+            f"VM host '{vmhost}' already registered in MAAS (id {existing_id}); skipping create."
+        )
+        return
     run(
         " ".join(
             [
