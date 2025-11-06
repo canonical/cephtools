@@ -422,13 +422,14 @@ def import_boot_resources(admin):
     run(f'maas "{admin}" boot-resources import')
     time.sleep(10)
     # read boot and loop until we have the required architecture
-    for _ in range(20):
+    for _ in range(100):
         out = run(f"maas {admin} boot-resources read").stdout
         resources = json.loads(out)
         arches = extract_arches(resources)
         if REQUIRED_BOOT_ARCHITECTURE in arches:
             return
         time.sleep(6)
+    time.sleep(3)
     raise Exception("Failed to import boot resources")
 
 
