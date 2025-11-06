@@ -278,7 +278,7 @@ def build_job_file(config: BackendConfig, queue_name: str, reserve_for: int) -> 
     lines.append("")
     lines.append("reserve_data:")
     lines.append("  ssh_keys:")
-    lines.append(f"    - lp:{config.launchpad_account}")
+    lines.append(f"    - {config.launchpad_account}")
     lines.append(f"  timeout: {reserve_for}")
     lines.append("")
     return "\n".join(lines)
