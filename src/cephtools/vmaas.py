@@ -759,7 +759,8 @@ def _create_nodes_impl(
     if vm_count <= 0:
         raise click.ClickException("--vm-count must be a positive integer.")
 
-    vm_host_id = _get_lxd_vm_host_id(ctx_obj["admin"], ctx_obj["vmhost"])
+    _get_lxd_vm_host_id(ctx_obj["admin"], ctx_obj["vmhost"])  # ensure host exists
+    vm_host_name = ctx_obj["vmhost"]
 
     clouds = read_vmaas_cloud_config()
     try:
@@ -802,7 +803,7 @@ def _create_nodes_impl(
     var_args = [
         f"-var {shlex.quote(f'maas_api_url={maas_api_url}')}",
         f"-var {shlex.quote(f'maas_api_key={maas_api_key}')}",
-        f"-var {shlex.quote(f'lxd_vm_host_id={vm_host_id}')}",
+        f"-var {shlex.quote(f'lxd_vm_host={vm_host_name}')}",
         f"-var {shlex.quote(f'vm_data_disk_size={vm_data_disk_size}')}",
         f"-var {shlex.quote(f'vm_data_disk_count={vm_data_disk_count}')}",
         f"-var {shlex.quote(f'vm_count={vm_count}')}",

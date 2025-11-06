@@ -11,9 +11,9 @@ locals {
 }
 
 resource "maas_vm_host_machine" "vms" {
-  count    = var.vm_count
+  count = var.vm_count
 
-  vm_host  = var.lxd_vm_host_id
+  vm_host  = var.lxd_vm_host
   hostname = format("%s-%02d", var.vm_prefix, count.index + 1)
 
   cores  = var.vm_cores
@@ -39,4 +39,4 @@ resource "maas_vm_host_machine" "vms" {
     fabric      = data.maas_subnet.external.fabric
   }
 }
-output "vm_hostnames"     { value = [for m in maas_vm_host_machine.vms : m.hostname] }
+output "vm_hostnames" { value = [for m in maas_vm_host_machine.vms : m.hostname] }

@@ -7,10 +7,9 @@ variable "maas_api_key" {
   sensitive = true
 }
 
-# MAAS expects the VM host ID (not the name). Look it up once:
-#   maas <profile> vm-hosts read | jq -r '.[]|[.id,.name]'
-variable "lxd_vm_host_id" {
-  type = string
+variable "lxd_vm_host" {
+  type        = string
+  description = "MAAS VM host name to compose VMs on."
 }
 
 # Defaults tailored to your inputs
@@ -50,7 +49,7 @@ variable "vm_data_disk_count" {
 }
 
 variable "primary_subnet_cidr" {
-  type    = string
+  type = string
 }
 
 variable "external_subnet_cidr" {
