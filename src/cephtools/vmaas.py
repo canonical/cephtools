@@ -32,6 +32,7 @@ DEFAULTS = load_vmaas_defaults()
 CEPHTOOLS_TAG = DEFAULTS["maas_tag"]
 CEPHTOOLS_MODEL = load_cephtools_config(ensure=True)["juju_model"]
 MAAS_CONTROLLER = "maas-controller"
+REQUIRED_BOOT_ARCHITECTURE = "amd64/generic"
 EXT_LXD_NETWORK = "ext"
 EXTERNAL_SPACE_NAME = "external"
 JUJU_SPACE_NAME = "jujuspace"
@@ -420,12 +421,12 @@ def extract_arches(resources):
 def import_boot_resources(admin):
     run(f'maas "{admin}" boot-resources import')
     time.sleep(10)
-    # read boot and loop until we have amd64/generic arch
+    # read boot and loop until we have the required architecture
     for _ in range(20):
         out = run(f"maas {admin} boot-resources read").stdout
         resources = json.loads(out)
         arches = extract_arches(resources)
-        if "amd64/generic" in arches:
+        if REQUIRED_BOOT_ARCHITECTURE in arches:
             return
         time.sleep(6)
     raise Exception("Failed to import boot resources")
@@ -527,6 +528,54 @@ def _get_lxd_vm_host_id(admin: str, vmhost: str) -> str:
             return str(host_id)
     raise click.ClickException(
         f"VM host '{vmhost}' not found in MAAS vm-hosts output."
+    )
+
+
+def _get_vm_host_architectures(admin: str, vmhost: str) -> list[str]:
+    result = run(f"maas {admin} vm-hosts read")
+    try:
+        hosts = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
+        raise click.ClickException(
+            "Failed to parse MAAS vm-hosts output as JSON."
+        ) from exc
+
+    for host in hosts:
+        if host.get("name") != vmhost:
+            continue
+        architectures = host.get("architectures") or []
+        if isinstance(architectures, list):
+            return [str(arch) for arch in architectures if arch]
+        return []
+
+    raise click.ClickException(
+        f"VM host '{vmhost}' not found in MAAS vm-hosts output."
+    )
+
+
+def _wait_for_vm_host_architecture(
+    admin: str,
+    vmhost: str,
+    architecture: str,
+    *,
+    timeout: int = 600,
+    interval: int = 6,
+) -> None:
+    """Poll until the MAAS VM host reports the required architecture."""
+
+    deadline = time.monotonic() + timeout
+    last_seen: list[str] = []
+    while time.monotonic() < deadline:
+        architectures = _get_vm_host_architectures(admin, vmhost)
+        if architecture in architectures:
+            return
+        last_seen = architectures
+        time.sleep(interval)
+
+    seen_msg = ", ".join(last_seen) if last_seen else "none"
+    raise click.ClickException(
+        f"Timed out waiting for MAAS VM host '{vmhost}' to report architecture "
+        f"'{architecture}'. Last seen architectures: {seen_msg}."
     )
 
 
@@ -881,7 +930,12 @@ def register_vm_host(ctx):
         ctx.obj["admin"], ctx.obj["vmhost"], ctx.obj["ip"], ctx.obj["admin_pw"]
     )
     import_boot_resources(ctx.obj["admin"])
-    click.echo("vm host registered and boot resources import kicked off.")
+    _wait_for_vm_host_architecture(
+        ctx.obj["admin"], ctx.obj["vmhost"], REQUIRED_BOOT_ARCHITECTURE
+    )
+    click.echo(
+        "vm host registered, boot resources import complete, and required architecture available."
+    )
 
 
 @cli.command(
@@ -989,6 +1043,9 @@ def juju_init(ctx):
     # health checks before creds
     verify_lxd(ctx.obj["lxdbridge"])
     verify_maas(ctx.obj["admin"])
+    _wait_for_vm_host_architecture(
+        ctx.obj["admin"], ctx.obj["vmhost"], REQUIRED_BOOT_ARCHITECTURE
+    )
     # juju install + creds/cloud
     ensure_snap("juju")
     api_key = maas_api_key(ctx.obj["admin"])
