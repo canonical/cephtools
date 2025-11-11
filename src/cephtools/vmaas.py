@@ -36,6 +36,7 @@ REQUIRED_BOOT_ARCHITECTURE = "amd64/generic"
 EXT_LXD_NETWORK = "ext"
 EXTERNAL_SPACE_NAME = "external"
 JUJU_SPACE_NAME = "jujuspace"
+ENSURE_NODES_INPUT_FILENAME = "ensure-nodes.hcl"
 
 
 def _format_juju_error(exc: jubilant.CLIError) -> str:
@@ -87,6 +88,32 @@ def _resolve_terragrunt_dir() -> Path:
         f"  - {attempted}\n"
         "Set CEPHTOOLS_TERRAGRUNT_DIR to override."
     )
+
+
+def _format_hcl_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return json.dumps(value)
+
+
+def _write_ensure_nodes_inputs_file(
+    terragrunt_dir: Path,
+    inputs: dict[str, object],
+) -> Path:
+    inputs_path = terragrunt_dir / ENSURE_NODES_INPUT_FILENAME
+    lines = ["inputs = {"]
+    for key, value in inputs.items():
+        lines.append(f"  {key} = {_format_hcl_value(value)}")
+    lines.append("}")
+    contents = "\n".join(lines) + "\n"
+
+    tmp_path = inputs_path.with_name(f".{inputs_path.name}.tmp")
+    tmp_path.write_text(contents)
+    os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, inputs_path)
+    return inputs_path
 
 
 def _terragrunt_vm_hostnames(terragrunt_dir: Path) -> list[str]:
@@ -799,23 +826,26 @@ def _create_nodes_impl(
         ) from exc
 
     terragrunt_dir = _resolve_terragrunt_dir()
+    inputs_path = _write_ensure_nodes_inputs_file(
+        terragrunt_dir,
+        {
+            "maas_api_url": maas_api_url,
+            "maas_api_key": maas_api_key,
+            "lxd_vm_host": vm_host_name,
+            "vm_data_disk_size": vm_data_disk_size,
+            "vm_data_disk_count": vm_data_disk_count,
+            "vm_count": vm_count,
+            "primary_subnet_cidr": primary_subnet_cidr,
+            "external_subnet_cidr": external_subnet_cidr,
+        },
+    )
+    click.echo(f"Saved Terragrunt inputs to {inputs_path}")
 
-    var_args = [
-        f"-var {shlex.quote(f'maas_api_url={maas_api_url}')}",
-        f"-var {shlex.quote(f'maas_api_key={maas_api_key}')}",
-        f"-var {shlex.quote(f'lxd_vm_host={vm_host_name}')}",
-        f"-var {shlex.quote(f'vm_data_disk_size={vm_data_disk_size}')}",
-        f"-var {shlex.quote(f'vm_data_disk_count={vm_data_disk_count}')}",
-        f"-var {shlex.quote(f'vm_count={vm_count}')}",
-        f"-var {shlex.quote(f'primary_subnet_cidr={primary_subnet_cidr}')}",
-        f"-var {shlex.quote(f'external_subnet_cidr={external_subnet_cidr}')}",
-    ]
     terragrunt_args = [
         "terragrunt",
         "apply",
         "-auto-approve",
         "-parallelism=1",
-        *var_args,
     ]
     terragrunt_cmd = " ".join(terragrunt_args)
     run(
@@ -827,6 +857,28 @@ def _create_nodes_impl(
     _ensure_maas_tag(ctx_obj["admin"], CEPHTOOLS_TAG)
     hostname_to_system_id = _tag_maas_machines(ctx_obj["admin"], hostnames, CEPHTOOLS_TAG)
     _tag_data_disks(ctx_obj["admin"], hostnames, hostname_to_system_id, tag="osd")
+
+
+def _destroy_nodes_impl() -> None:
+    terragrunt_dir = _resolve_terragrunt_dir()
+    inputs_path = terragrunt_dir / ENSURE_NODES_INPUT_FILENAME
+    if not inputs_path.exists():
+        raise click.ClickException(
+            f"Terragrunt input file {inputs_path} not found. Run 'cephtools vmaas ensure-nodes' first."
+        )
+
+    click.echo(f"Destroying nodes using inputs from {inputs_path}")
+    terragrunt_args = [
+        "terragrunt",
+        "destroy",
+        "-auto-approve",
+        "-parallelism=1",
+    ]
+    terragrunt_cmd = " ".join(terragrunt_args)
+    run(
+        f"cd {shlex.quote(str(terragrunt_dir))} && {terragrunt_cmd}",
+        shell=True,
+    )
 
 
 # ---- click CLI ------------------------------------------------------------
@@ -1034,6 +1086,16 @@ def ensure_nodes(
     click.echo(
         "Terragrunt apply completed; MAAS will reconcile VM nodes."
     )
+
+
+@cli.command(
+    "destroy-nodes",
+    help="Destroy MAAS VMs previously created by ensure-nodes using saved Terragrunt inputs.",
+)
+@click.pass_context
+def destroy_nodes(ctx):
+    _destroy_nodes_impl()
+    click.echo("Terragrunt destroy completed; MAAS will reconcile VM removals.")
 
 
 @cli.command(

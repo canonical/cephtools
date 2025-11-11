@@ -13,3 +13,4 @@ wheels/
 /state
 .venv
 /.rustup
+terraform/maas-nodes/ensure-nodes.hcl
