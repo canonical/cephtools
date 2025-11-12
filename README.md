@@ -25,7 +25,7 @@ Below are the individual steps:
 - `cephtools testenv lxd-init`:runs the non-interactive LXD initialisation using the configured bridge.
 - `cephtools testenv maas-init`:initialises MAAS (region + rack), creates/logs in the admin user, and writes `cloud.yaml`.
 - `cephtools testenv register-vm-host` registers the local LXD as a VM host in MAAS and kicks off boot-resource imports.
-- `cephtools testenv configure-network` : configures the default VLAN in MAAS (gateway, DHCP range, space) and records the details in `~/.local/state/cephtools/network.yaml`.
+- `cephtools testenv configure-network` : configures the default VLAN in MAAS (gateway, DHCP range, space) and records the details `state/network.yaml`.
 - `cephtools testenv ensure-nodes`: reconciles the VM inventory via Terragrunt; override the number of VMs and attached data disks with `--vm-count`, `--vm-data-disk-count`, and `--vm-data-disk-size`.
 - `cephtools testenv juju-init`: verifies MAAS/LXD health, installs Juju, writes credentials, onboards the cloud, and bootstraps the controller.
 
@@ -40,7 +40,11 @@ Utilities that execute MicroCeph management commands across every unit in a depl
 - `--nodes <machine-id>` (repeatable) to target specific Juju machine IDs, defaults to all.
 - `--dry-run` to print the commands without executing them.
 
-Use `--` to pass in args to the invoked `microceph disk add` command.
+Use `--` to pass in args to the invoked `microceph disk add` command, for instance:
+
+```
+cephtools microceph disk add -- --all-available
+```
 
 
 ## Release tooling
