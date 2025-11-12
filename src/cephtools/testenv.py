@@ -16,18 +16,18 @@ import jubilant
 from cephtools.common import ensure_snap, run
 from cephtools.config import (
     load_cephtools_config,
-    load_vmaas_defaults,
+    load_testenv_defaults,
 )
 from cephtools.state import get_state_file
 from cephtools.terraform import ensure_terragrunt, terraform_root_candidates
 from cephtools.testflinger import (
-    read_vmaas_cloud_config,
-    read_vmaas_credentials,
-    read_vmaas_network_config,
+    read_testenv_cloud_config,
+    read_testenv_credentials,
+    read_testenv_network_config,
 )
 
 # ---- defaults from configuration -----------------------------------------
-DEFAULTS = load_vmaas_defaults()
+DEFAULTS = load_testenv_defaults()
 
 CEPHTOOLS_TAG = DEFAULTS["maas_tag"]
 CEPHTOOLS_MODEL = load_cephtools_config(ensure=True)["juju_model"]
@@ -789,7 +789,7 @@ def _create_nodes_impl(
     _get_lxd_vm_host_id(ctx_obj["admin"], ctx_obj["vmhost"])  # ensure host exists
     vm_host_name = ctx_obj["vmhost"]
 
-    clouds = read_vmaas_cloud_config()
+    clouds = read_testenv_cloud_config()
     try:
         maas_cloud = clouds["maas-cloud"]
         maas_api_url = maas_cloud["endpoint"]
@@ -798,7 +798,7 @@ def _create_nodes_impl(
             "cloud.yaml is missing required maas-cloud endpoint."
         ) from exc
 
-    credentials = read_vmaas_credentials()
+    credentials = read_testenv_credentials()
     try:
         maas_api_key = credentials["maas-cloud"]["admin"]["maas-oauth"]
     except KeyError as exc:
@@ -806,7 +806,7 @@ def _create_nodes_impl(
             "cred.yaml is missing maas-cloud admin credentials."
         ) from exc
 
-    network = read_vmaas_network_config()
+    network = read_testenv_network_config()
     try:
         primary_subnet_cidr = network["cidr"]
     except KeyError as exc:
@@ -864,7 +864,7 @@ def _destroy_nodes_impl() -> None:
     inputs_path = terragrunt_dir / ENSURE_NODES_INPUT_FILENAME
     if not inputs_path.exists():
         raise click.ClickException(
-            f"Terragrunt input file {inputs_path} not found. Run 'cephtools vmaas ensure-nodes' first."
+            f"Terragrunt input file {inputs_path} not found. Run 'cephtools testenv ensure-nodes' first."
         )
 
     click.echo(f"Destroying nodes using inputs from {inputs_path}")
@@ -1052,7 +1052,7 @@ def configure_network(ctx):
 
 @cli.command(
     "ensure-nodes",
-    help="Ensure the desired set of MAAS VMs exist using terragrunt and VMaaS configuration files.",
+    help="Ensure the desired set of MAAS VMs exist using terragrunt and testenv configuration files.",
 )
 @click.option(
     "--vm-data-disk-size",
@@ -1127,8 +1127,8 @@ def juju_init(ctx):
 )
 @click.pass_context
 def install(ctx):
-    """Run all vmaas installation steps in sequence."""
-    click.echo("Starting full vmaas installation...")
+    """Run all testenv installation steps in sequence."""
+    click.echo("Starting full testenv installation...")
 
     click.echo("\n=== Step 1/7: Installing dependencies ===")
     ctx.invoke(install_deps)

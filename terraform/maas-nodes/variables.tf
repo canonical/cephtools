@@ -15,7 +15,7 @@ variable "lxd_vm_host" {
 # Defaults tailored to your inputs
 variable "vm_count" {
   type    = number
-  default = 6
+  default = 4
 }
 
 variable "vm_prefix" {
@@ -35,7 +35,7 @@ variable "vm_memory" {
 
 variable "vm_root_disk_size" {
   type    = number
-  default = 8
+  default = 16
 }
 
 variable "vm_data_disk_size" {

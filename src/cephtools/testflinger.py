@@ -94,7 +94,7 @@ def load_backend_config(path: Path) -> BackendConfig:
     )
 
 
-def read_vmaas_network_config(path: Path | None = None) -> dict[str, object]:
+def read_testenv_network_config(path: Path | None = None) -> dict[str, object]:
     target = Path(path) if path is not None else get_state_file("network.yaml")
     target = target.expanduser()
     if not target.exists():
@@ -113,7 +113,7 @@ def read_vmaas_network_config(path: Path | None = None) -> dict[str, object]:
     return network
 
 
-def read_vmaas_cloud_config(path: Path | None = None) -> dict[str, object]:
+def read_testenv_cloud_config(path: Path | None = None) -> dict[str, object]:
     target = Path(path) if path is not None else get_state_file("cloud.yaml")
     target = target.expanduser()
     if not target.exists():
@@ -127,7 +127,7 @@ def read_vmaas_cloud_config(path: Path | None = None) -> dict[str, object]:
         ) from exc
 
 
-def read_vmaas_credentials(path: Path | None = None) -> dict[str, object]:
+def read_testenv_credentials(path: Path | None = None) -> dict[str, object]:
     target = Path(path) if path is not None else get_state_file("cred.yaml")
     target = target.expanduser()
     if not target.exists():
@@ -147,13 +147,13 @@ def machine_ids(count: int, offset: int = 0) -> list[str]:
     if offset < 0:
         raise click.ClickException("offset must be zero or a positive integer.")
 
-    clouds = read_vmaas_cloud_config()
+    clouds = read_testenv_cloud_config()
     if "maas-cloud" not in clouds or not isinstance(clouds["maas-cloud"], dict):
         raise click.ClickException(
             "cloud.yaml is missing maas-cloud configuration."
         )
 
-    credentials = read_vmaas_credentials()
+    credentials = read_testenv_credentials()
     try:
         cloud_creds = credentials["maas-cloud"]
     except KeyError as exc:
@@ -172,7 +172,7 @@ def machine_ids(count: int, offset: int = 0) -> list[str]:
             "cred.yaml has unexpected structure for maas-cloud credentials."
         )
 
-    read_vmaas_network_config()  # ensure file exists/valid; not directly used here.
+    read_testenv_network_config()  # ensure file exists/valid; not directly used here.
 
     cmd = [
         "maas",
@@ -483,7 +483,7 @@ def build_deploy_script() -> str:
             "cd cephtools/",
             "uv pip install --system --prefix ~/.local .",
             'export PATH="$PATH:$HOME/.local/bin"',
-            "cephtools vmaas install",
+            "cephtools testenv install",
             "",
         ]
     )
@@ -621,7 +621,7 @@ def deploy(  # pragma: no cover - exercised via click integration tests
     mattermost_name: str | None,
     testflinger_bin: str,
 ) -> None:
-    """Reserve a queue and install cephtools + VMaaS on it."""
+    """Reserve a queue and install cephtools + testenv on it."""
     if reserve_for <= 0:
         raise click.ClickException("--reserve-for must be a positive integer.")
 
@@ -646,7 +646,7 @@ def deploy(  # pragma: no cover - exercised via click integration tests
     print_reservation_summary(details, testflinger_bin, click.echo)
 
     click.echo("")
-    click.echo("Configuring remote environment for VMaaS deployment.")
+    click.echo("Configuring remote environment for testenv deployment.")
     script = build_deploy_script()
     try:
         perform_remote_deploy(
@@ -656,9 +656,9 @@ def deploy(  # pragma: no cover - exercised via click integration tests
         )
     except click.ClickException as exc:
         raise click.ClickException(
-            "Failed to deploy VMaaS on queue "
+            "Failed to deploy testenv on queue "
             f"{details.queue_name} ({details.ip}): {exc.message}"
         ) from exc
 
-    click.echo("Remote deployment succeeded. VMaaS should now be installed.")
+    click.echo("Remote deployment succeeded. Testenv should now be installed.")
     click.echo(f"Connect with: {_build_ssh_command(details)}")

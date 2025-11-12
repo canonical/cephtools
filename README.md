@@ -13,21 +13,21 @@ just build-pex
 
 The resulting archive is written to `dist/cephtools.pex`. 
 
-## VMaaS bootstrap (`cephtools vmaas`)
+## Testenv bootstrap (`cephtools testenv`)
 
-Use `cephtools vmaas` to stand up or manage a local MAAS/LXD/Juju lab for VMaaS development. 
+Use `cephtools testenv` to stand up or manage a local MAAS/LXD/Juju lab for test environment development. 
 
-- `cephtools vmaas install`: runs the full workflow: install snaps, initialise LXD, bring up MAAS, register the LXD VM host, configure networking, bootstrap Juju, and ensure the default model exists.
+- `cephtools testenv install`: runs the full workflow: install snaps, initialise LXD, bring up MAAS, register the LXD VM host, configure networking, bootstrap Juju, and ensure the default model exists.
 
 Below are the individual steps:
 
-- `cephtools vmaas install-deps`: installs the required snaps (`maas`, `maas-test-db`, `lxd`, `terraform`) and Terragrunt, then checks LXD is ready.
-- `cephtools vmaas lxd-init`:runs the non-interactive LXD initialisation using the configured bridge.
-- `cephtools vmaas maas-init`:initialises MAAS (region + rack), creates/logs in the admin user, and writes `cloud.yaml`.
-- `cephtools vmaas register-vm-host` registers the local LXD as a VM host in MAAS and kicks off boot-resource imports.
-- `cephtools vmaas configure-network` : configures the default VLAN in MAAS (gateway, DHCP range, space) and records the details in `~/.local/state/cephtools/network.yaml`.
-- `cephtools vmaas ensure-nodes`: reconciles the VM inventory via Terragrunt; override the number of VMs and attached data disks with `--vm-count`, `--vm-data-disk-count`, and `--vm-data-disk-size`.
-- `cephtools vmaas juju-init`: verifies MAAS/LXD health, installs Juju, writes credentials, onboards the cloud, and bootstraps the controller.
+- `cephtools testenv install-deps`: installs the required snaps (`maas`, `maas-test-db`, `lxd`, `terraform`) and Terragrunt, then checks LXD is ready.
+- `cephtools testenv lxd-init`:runs the non-interactive LXD initialisation using the configured bridge.
+- `cephtools testenv maas-init`:initialises MAAS (region + rack), creates/logs in the admin user, and writes `cloud.yaml`.
+- `cephtools testenv register-vm-host` registers the local LXD as a VM host in MAAS and kicks off boot-resource imports.
+- `cephtools testenv configure-network` : configures the default VLAN in MAAS (gateway, DHCP range, space) and records the details in `~/.local/state/cephtools/network.yaml`.
+- `cephtools testenv ensure-nodes`: reconciles the VM inventory via Terragrunt; override the number of VMs and attached data disks with `--vm-count`, `--vm-data-disk-count`, and `--vm-data-disk-size`.
+- `cephtools testenv juju-init`: verifies MAAS/LXD health, installs Juju, writes credentials, onboards the cloud, and bootstraps the controller.
 
 Set `CEPHTOOLS_TERRAGRUNT_DIR` or the `terragrunt_dir` key in `cephtools.yaml` to point at your Terragrunt plans if they live outside the repository. The MicroCeph Terragrunt/Terraform module now lives in the
 [charm-microceph](https://github.com/canonical/charm-microceph/tree/main/terraform/microceph) repository.
