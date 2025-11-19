@@ -446,6 +446,7 @@ def extract_arches(resources):
 
 
 def import_boot_resources(admin):
+    """Import images, wait for them to become available."""
     run(f'maas "{admin}" boot-resources import')
     time.sleep(10)
     # read boot and loop until we have the required architecture
@@ -456,7 +457,7 @@ def import_boot_resources(admin):
         if REQUIRED_BOOT_ARCHITECTURE in arches:
             return
         time.sleep(6)
-    time.sleep(3)
+    time.sleep(10)  # wait to become actually avail
     raise Exception("Failed to import boot resources")
 
 
@@ -590,7 +591,6 @@ def _wait_for_vm_host_architecture(
     interval: int = 6,
 ) -> None:
     """Poll until the MAAS VM host reports the required architecture."""
-
     deadline = time.monotonic() + timeout
     last_seen: list[str] = []
     while time.monotonic() < deadline:
