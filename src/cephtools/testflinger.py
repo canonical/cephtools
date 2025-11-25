@@ -79,13 +79,10 @@ def load_backend_config(path: Path) -> BackendConfig:
     try:
         launchpad_account = data["launchpad_account"]
     except KeyError as exc:  # pragma: no cover - defensive
-        raise click.ClickException(
-            f"Missing required key {exc!s} in {path}"
-        ) from exc
+        raise click.ClickException(f"Missing required key {exc!s} in {path}") from exc
     if launchpad_account is None:
         raise click.ClickException(
-            f"Incomplete configuration in {path}: "
-            "launchpad_account must be set."
+            f"Incomplete configuration in {path}: launchpad_account must be set."
         )
     return BackendConfig(
         launchpad_account=launchpad_account,
@@ -103,9 +100,7 @@ def read_testenv_network_config(path: Path | None = None) -> dict[str, object]:
     try:
         network = data["network"]
     except KeyError as exc:
-        raise click.ClickException(
-            f"{path} is missing the 'network' section."
-        ) from exc
+        raise click.ClickException(f"{path} is missing the 'network' section.") from exc
     if not isinstance(network, dict):
         raise click.ClickException(
             f"{path} has unexpected structure for the 'network' section."
@@ -122,9 +117,7 @@ def read_testenv_cloud_config(path: Path | None = None) -> dict[str, object]:
     try:
         return data["clouds"]
     except KeyError as exc:
-        raise click.ClickException(
-            f"{path} is missing the 'clouds' section."
-        ) from exc
+        raise click.ClickException(f"{path} is missing the 'clouds' section.") from exc
 
 
 def read_testenv_credentials(path: Path | None = None) -> dict[str, object]:
@@ -149,9 +142,7 @@ def machine_ids(count: int, offset: int = 0) -> list[str]:
 
     clouds = read_testenv_cloud_config()
     if "maas-cloud" not in clouds or not isinstance(clouds["maas-cloud"], dict):
-        raise click.ClickException(
-            "cloud.yaml is missing maas-cloud configuration."
-        )
+        raise click.ClickException("cloud.yaml is missing maas-cloud configuration.")
 
     credentials = read_testenv_credentials()
     try:
@@ -189,9 +180,7 @@ def machine_ids(count: int, offset: int = 0) -> list[str]:
         )
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.strip() if exc.stderr else "unknown error"
-        raise click.ClickException(
-            f"Failed to query MAAS machines: {stderr}"
-        ) from exc
+        raise click.ClickException(f"Failed to query MAAS machines: {stderr}") from exc
 
     try:
         machines = json.loads(result.stdout)
@@ -204,7 +193,11 @@ def machine_ids(count: int, offset: int = 0) -> list[str]:
     if offset >= len(machines):
         return []
     selected = machines[offset : offset + count]
-    return [str(machine.get("system_id")) for machine in selected if machine.get("system_id")]
+    return [
+        str(machine.get("system_id"))
+        for machine in selected
+        if machine.get("system_id")
+    ]
 
 
 def save_backend_config(path: Path, config: BackendConfig) -> None:
@@ -255,9 +248,7 @@ def ensure_backend_config(
     )
     save_backend_config(path, config)
     click.echo(f"Saved configuration to {path}")
-    click.echo(
-        "Run the command again to reserve a queue, now that the config exists."
-    )
+    click.echo("Run the command again to reserve a queue, now that the config exists.")
     return (config, True)
 
 
@@ -300,9 +291,7 @@ def parse_submit_output(stdout: str) -> str:
         )
     parts = lines[1].split()
     if len(parts) < 2:
-        raise click.ClickException(
-            "Could not extract job id from testflinger output."
-        )
+        raise click.ClickException("Could not extract job id from testflinger output.")
     return parts[-1]
 
 

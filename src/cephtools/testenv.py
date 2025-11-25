@@ -130,15 +130,11 @@ def _terragrunt_vm_hostnames(terragrunt_dir: Path) -> list[str]:
 
     hostnames_value = outputs.get("vm_hostnames")
     if not isinstance(hostnames_value, dict) or "value" not in hostnames_value:
-        raise click.ClickException(
-            "Terragrunt outputs did not include vm_hostnames."
-        )
+        raise click.ClickException("Terragrunt outputs did not include vm_hostnames.")
 
     hostnames = hostnames_value["value"]
     if not isinstance(hostnames, list):
-        raise click.ClickException(
-            "Terragrunt vm_hostnames output must be a list."
-        )
+        raise click.ClickException("Terragrunt vm_hostnames output must be a list.")
 
     return [str(hostname) for hostname in hostnames]
 
@@ -148,9 +144,7 @@ def _ensure_maas_tag(admin: str, tag: str) -> None:
     try:
         tags = json.loads(result.stdout or "[]")
     except json.JSONDecodeError as exc:  # pragma: no cover - defensive
-        raise click.ClickException(
-            "Failed to parse MAAS tags output as JSON."
-        ) from exc
+        raise click.ClickException("Failed to parse MAAS tags output as JSON.") from exc
 
     for entry in tags:
         if isinstance(entry, dict) and entry.get("name") == tag:
@@ -197,7 +191,9 @@ def _tag_maas_machines(admin: str, hostnames: list[str], tag: str) -> dict[str, 
     return hostname_to_system_id
 
 
-def _tag_data_disks(admin: str, hostnames: list[str], hostname_to_system_id: dict[str, str], *, tag: str) -> None:
+def _tag_data_disks(
+    admin: str, hostnames: list[str], hostname_to_system_id: dict[str, str], *, tag: str
+) -> None:
     for hostname in hostnames:
         system_id = hostname_to_system_id.get(hostname)
         if not system_id:
@@ -555,9 +551,7 @@ def _get_lxd_vm_host_id(admin: str, vmhost: str) -> str:
             if host_id is None:
                 break
             return str(host_id)
-    raise click.ClickException(
-        f"VM host '{vmhost}' not found in MAAS vm-hosts output."
-    )
+    raise click.ClickException(f"VM host '{vmhost}' not found in MAAS vm-hosts output.")
 
 
 def _get_vm_host_architectures(admin: str, vmhost: str) -> list[str]:
@@ -577,9 +571,7 @@ def _get_vm_host_architectures(admin: str, vmhost: str) -> list[str]:
             return [str(arch) for arch in architectures if arch]
         return []
 
-    raise click.ClickException(
-        f"VM host '{vmhost}' not found in MAAS vm-hosts output."
-    )
+    raise click.ClickException(f"VM host '{vmhost}' not found in MAAS vm-hosts output.")
 
 
 def _wait_for_vm_host_architecture(
@@ -855,7 +847,9 @@ def _create_nodes_impl(
 
     hostnames = _terragrunt_vm_hostnames(terragrunt_dir)
     _ensure_maas_tag(ctx_obj["admin"], CEPHTOOLS_TAG)
-    hostname_to_system_id = _tag_maas_machines(ctx_obj["admin"], hostnames, CEPHTOOLS_TAG)
+    hostname_to_system_id = _tag_maas_machines(
+        ctx_obj["admin"], hostnames, CEPHTOOLS_TAG
+    )
     _tag_data_disks(ctx_obj["admin"], hostnames, hostname_to_system_id, tag="osd")
 
 
@@ -1008,14 +1002,20 @@ def configure_network(ctx):
     assign_space_to_vlan(ctx.obj["admin"], fabric_id, vlan_id, space_id)
     click.echo(f"space '{JUJU_SPACE_NAME}' ({space_id}) created and assigned to VLAN.")
     ext_cidr, ext_gw = lxd_network_cidr_and_gateway(EXT_LXD_NETWORK)
-    ext_sid, ext_fabric_id, ext_vlan_id, ext_rack_sysid = maas_subnet_ids(ctx.obj["admin"], ext_cidr)
+    ext_sid, ext_fabric_id, ext_vlan_id, ext_rack_sysid = maas_subnet_ids(
+        ctx.obj["admin"], ext_cidr
+    )
     update_subnet_gateway(ctx.obj["admin"], ext_sid, ext_gw)
-    ext_start_ip, ext_end_ip = create_dynamic_iprange(ctx.obj["admin"], ext_sid, ext_cidr)
+    ext_start_ip, ext_end_ip = create_dynamic_iprange(
+        ctx.obj["admin"], ext_sid, ext_cidr
+    )
     enable_vlan_dhcp(ctx.obj["admin"], ext_fabric_id, ext_vlan_id, ext_rack_sysid)
     click.echo(f"network configured on {EXT_LXD_NETWORK} ({ext_cidr}, gw {ext_gw}).")
     ext_space_id = create_space(ctx.obj["admin"], EXTERNAL_SPACE_NAME)
     assign_space_to_vlan(ctx.obj["admin"], ext_fabric_id, ext_vlan_id, ext_space_id)
-    click.echo(f"space '{EXTERNAL_SPACE_NAME}' ({ext_space_id}) created and assigned to VLAN.")
+    click.echo(
+        f"space '{EXTERNAL_SPACE_NAME}' ({ext_space_id}) created and assigned to VLAN."
+    )
     network_yaml = "\n".join(
         [
             "network:",
@@ -1083,9 +1083,7 @@ def ensure_nodes(
     vm_count: int,
 ) -> None:
     _create_nodes_impl(ctx.obj, vm_data_disk_size, vm_data_disk_count, vm_count)
-    click.echo(
-        "Terragrunt apply completed; MAAS will reconcile VM nodes."
-    )
+    click.echo("Terragrunt apply completed; MAAS will reconcile VM nodes.")
 
 
 @cli.command(

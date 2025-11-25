@@ -56,7 +56,9 @@ def run(
     )
 
 
-def ensure_snap(name: str, channel: str | None = None, *, classic: bool = False) -> None:
+def ensure_snap(
+    name: str, channel: str | None = None, *, classic: bool = False
+) -> None:
     """
     Ensure a snap is present, installing it if necessary.
     """

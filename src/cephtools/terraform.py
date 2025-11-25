@@ -14,7 +14,9 @@ from cephtools.config import DEFAULT_TERRAFORM_ROOT, load_cephtools_config
 TERRAGRUNT_VERSION = "v0.89.3"
 
 
-def ensure_terragrunt(version: str = TERRAGRUNT_VERSION, bin_dir: str = "/usr/local/bin") -> None:
+def ensure_terragrunt(
+    version: str = TERRAGRUNT_VERSION, bin_dir: str = "/usr/local/bin"
+) -> None:
     """
     Ensure the Terragrunt binary is installed at the requested location.
     """
@@ -36,12 +38,12 @@ def ensure_terragrunt(version: str = TERRAGRUNT_VERSION, bin_dir: str = "/usr/lo
     }
     arch = arch_map.get(machine)
     if arch is None:
-        raise RuntimeError(f"Unsupported architecture for terragrunt: {platform.machine()}")
+        raise RuntimeError(
+            f"Unsupported architecture for terragrunt: {platform.machine()}"
+        )
 
     terragrunt_bin = f"terragrunt_{system}_{arch}"
-    terragrunt_url = (
-        f"https://github.com/gruntwork-io/terragrunt/releases/download/{version}/{terragrunt_bin}"
-    )
+    terragrunt_url = f"https://github.com/gruntwork-io/terragrunt/releases/download/{version}/{terragrunt_bin}"
 
     run(["curl", "-fsSL", "-o", terragrunt_bin, terragrunt_url])
     run(["chmod", "+x", terragrunt_bin])

@@ -47,9 +47,7 @@ def load_nested_yaml(path: Path) -> dict[str, Any]:
     try:
         data = yaml.safe_load(raw) or {}
     except yaml.YAMLError as exc:
-        raise click.ClickException(
-            f"Failed to parse YAML in {target}: {exc}"
-        ) from exc
+        raise click.ClickException(f"Failed to parse YAML in {target}: {exc}") from exc
 
     if not isinstance(data, dict):
         raise click.ClickException(
@@ -81,7 +79,9 @@ def _config_path() -> Path:
     return get_state_file(CONFIG_FILENAME)
 
 
-def load_cephtools_config(path: Path | None = None, *, ensure: bool = False) -> dict[str, Any]:
+def load_cephtools_config(
+    path: Path | None = None, *, ensure: bool = False
+) -> dict[str, Any]:
     target = (path or _config_path()).expanduser()
     if ensure and not target.exists():
         _write_default_config(target)

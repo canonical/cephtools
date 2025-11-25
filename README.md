@@ -2,6 +2,31 @@
 
 Tooling for the Ceph team
 
+## Install
+
+
+### Binary
+
+Install the PXE based binary:
+
+```
+sudo wget -O /usr/local/bin/cephtools https://github.com/canonical/cephtools/releases/download/latest/cephtools
+sudo chmod +x /usr/local/bin/cephtools
+
+```
+
+### Source
+
+Clone source and install via uv:
+
+```
+sudo snap install astral-uv --classic
+git clone https://github.com/canonical/cephtools.git
+cd cephtools
+uv pip install --system --prefix ~/.local .
+export PATH="$PATH:$HOME/.local/bin"
+```
+
 ## Packaging
 
 To build a standalone PEX installer that bundles the CLI and its dependencies:
@@ -12,6 +37,40 @@ just build-pex
 ```
 
 The resulting archive is written to `dist/cephtools.pex`. 
+
+## Testflinger deployment (`cephtools testflinger`)
+
+Commands to reserve nodes via Testflinger and bootstrap testing environments.
+
+### Reserve a node
+
+Reserve a machine for interactive use:
+
+```bash
+cephtools testflinger reserve [QUEUE_NAME] \
+    --launchpad-account <username> \
+    --reserve-for <seconds>
+```
+
+This submits a job to the specified queue (defaults to `ceph-qa-1`), waits for the reservation to become active, and prints the SSH connection details.
+
+### Deploy a test environment
+
+Reserve a machine and automatically deploy `cephtools` and its test environment dependencies:
+
+```bash
+cephtools testflinger deploy [QUEUE_NAME] \
+    --launchpad-account <username> \
+    --reserve-for <seconds>
+```
+
+This command:
+1. Reserves a node on the specified queue.
+2. SSHs into the node once active.
+3. Installs `cephtools` and dependencies (LXD, MAAS, Juju, etc.) via `cephtools testenv install`.
+
+Once complete, it provides the SSH command to access the ready-to-use test environment.
+
 
 ## Testenv bootstrap (`cephtools testenv`)
 
@@ -45,6 +104,7 @@ Use `--` to pass in args to the invoked `microceph disk add` command, for instan
 ```
 cephtools microceph disk add -- --all-available
 ```
+
 
 
 ## Release tooling

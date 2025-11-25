@@ -13,9 +13,13 @@ from cephtools.juju_utils import application_machines
 def _resolve_nodes(nodes_override: Iterable[str] | None = None) -> tuple[int, ...]:
     """Determine MicroCeph nodes from CLI overrides or Juju status."""
     if nodes_override:
-        nodes = tuple(_validate_node_value(node, origin="--nodes") for node in nodes_override)
+        nodes = tuple(
+            _validate_node_value(node, origin="--nodes") for node in nodes_override
+        )
         if not nodes:
-            raise click.ClickException("At least one node must be provided via --nodes.")
+            raise click.ClickException(
+                "At least one node must be provided via --nodes."
+            )
         return nodes
 
     config = load_cephtools_config(ensure=True)
@@ -40,12 +44,16 @@ def _validate_node_value(node: object, *, origin: str) -> int:
         if not node:
             raise click.ClickException(f"{origin} entries must be non-empty integers.")
         if not node.isdigit():
-            raise click.ClickException(f"{origin} entries must be integers, got {node!r}.")
+            raise click.ClickException(
+                f"{origin} entries must be integers, got {node!r}."
+            )
         value = int(node, 10)
     elif isinstance(node, int):
         value = node
     else:
-        raise click.ClickException(f"{origin} entries must be integers or numeric strings.")
+        raise click.ClickException(
+            f"{origin} entries must be integers or numeric strings."
+        )
 
     if value < 0:
         raise click.ClickException(f"{origin} entries must be non-negative integers.")
@@ -81,9 +89,13 @@ def _run_on_all_nodes(
     for node in nodes:
         remote_command = list(command_factory(node))
         if not remote_command:
-            raise click.ClickException("Command factory must return at least one argument per node.")
+            raise click.ClickException(
+                "Command factory must return at least one argument per node."
+            )
 
-        display_command = ["sudo", *remote_command] if use_sudo else list(remote_command)
+        display_command = (
+            ["sudo", *remote_command] if use_sudo else list(remote_command)
+        )
         quoted = " ".join(shlex.quote(part) for part in display_command)
         click.echo(f"[{node}] {quoted}")
 
