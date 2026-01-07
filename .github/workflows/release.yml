@@ -27,7 +27,7 @@ jobs:
         run: |
           echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
       - name: Publish latest release
-        uses: ncipollo/release-action@b7eabc95ff50cbeeedec83973935c8f306dfcd0b
+        uses: ncipollo/release-action@411d95d6a352b94952f1b6c64804b93c251f7db9
         with:
           tag: latest
           name: Latest (build ${{ github.run_number }})
