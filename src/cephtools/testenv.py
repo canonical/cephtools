@@ -444,16 +444,27 @@ def extract_arches(resources):
 def import_boot_resources(admin):
     """Import images, wait for them to become available."""
     run(f'maas "{admin}" boot-resources import')
-    time.sleep(10)
+    time.sleep(15)
     # read boot and loop until we have the required architecture
-    for _ in range(100):
+    for _ in range(120):
         out = run(f"maas {admin} boot-resources read").stdout
         resources = json.loads(out)
         arches = extract_arches(resources)
         if REQUIRED_BOOT_ARCHITECTURE in arches:
-            return
+            click.echo(
+                f"Found {REQUIRED_BOOT_ARCHITECTURE}, waiting for it to stabilize..."
+            )
+            time.sleep(30)
+            # Final check to ensure it didn't disappear (e.g. failed download)
+            out = run(f"maas {admin} boot-resources read").stdout
+            resources = json.loads(out)
+            arches = extract_arches(resources)
+            if REQUIRED_BOOT_ARCHITECTURE in arches:
+                return
+            raise Exception(
+                f"Boot resource {REQUIRED_BOOT_ARCHITECTURE} disappeared after import!"
+            )
         time.sleep(6)
-    time.sleep(10)  # wait to become actually avail
     raise Exception("Failed to import boot resources")
 
 
