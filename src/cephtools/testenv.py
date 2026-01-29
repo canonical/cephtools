@@ -329,6 +329,35 @@ def verify_lxd(lxdbridge):
         raise RuntimeError(f"Network {EXT_LXD_NETWORK} is not managed")
 
 
+def lxd_warmup():
+    """Create a temporary VM to warm up LXD and DNS."""
+    click.echo("Warming up LXD with a temporary 24.04 VM...")
+    vm_name = "warmup-vm"
+    run(f"lxc delete {vm_name} --force", check=False, quiet=True)
+
+    try:
+        run(
+            f"lxc launch ubuntu:24.04 {vm_name} --vm -c limits.cpu=2 -c limits.memory=1GB"
+        )
+
+        deadline = time.monotonic() + 300  # 5 minutes max
+        success = False
+        while time.monotonic() < deadline:
+            time.sleep(10)
+            try:
+                run(f"lxc exec {vm_name} -- apt-get update", check=True)
+                success = True
+                break
+            except subprocess.CalledProcessError:
+                click.echo("Warmup VM not ready yet, retrying...")
+
+        if not success:
+            click.echo("Warning: Warmup apt-get update timed out.")
+
+    finally:
+        run(f"lxc delete {vm_name} --force", check=False)
+
+
 def _maas_is_initialized() -> bool:
     status = run("sudo maas status", check=False, quiet=True)
     if status.returncode != 0:
@@ -958,6 +987,7 @@ def install_deps(ctx):
 def lxd_init_cmd(ctx):
     lxd_init_impl(ctx.obj["ip"], ctx.obj["admin_pw"], ctx.obj["lxdbridge"])
     verify_lxd(ctx.obj["lxdbridge"])
+    lxd_warmup()
     click.echo("lxd ready.")
 
 
