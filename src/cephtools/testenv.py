@@ -333,11 +333,13 @@ def lxd_warmup():
     """Create a temporary VM to warm up LXD and DNS."""
     click.echo("Warming up LXD with a temporary 24.04 VM...")
     vm_name = "warmup-vm"
-    run(f"lxc delete {vm_name} --force", check=False, quiet=True)
+    click.echo(f"Cleaning up any existing instance of {vm_name}...")
+    run(f"lxc delete {vm_name} --force", check=False)
 
     try:
         run(
-            f"lxc launch ubuntu:24.04 {vm_name} --vm -c limits.cpu=2 -c limits.memory=1GB"
+            f"lxc launch ubuntu:24.04 {vm_name} --vm -c limits.cpu=2 -c limits.memory=1GB </dev/null",
+            shell=True,
         )
 
         deadline = time.monotonic() + 300  # 5 minutes max
