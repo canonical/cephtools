@@ -8,13 +8,15 @@ import os
 from datetime import datetime
 
 
-def download_and_get_ts(charm, channel, base):
+def download_and_get_ts(charm, channel, base, verbose=False):
     # ensure juju’s common snap tmp dir exists
     juju_tmp = os.path.expanduser("~/snap/juju/common")
     os.makedirs(juju_tmp, exist_ok=True)
 
     # download charm into that dir, silently
     dest = tempfile.NamedTemporaryFile(suffix=".charm", delete=False, dir=juju_tmp).name
+    if verbose:
+        click.echo(f"Downloading {charm} from channel {channel} (base {base}) to {dest}")
     subprocess.check_call(
         [
             "juju",
@@ -39,7 +41,10 @@ def download_and_get_ts(charm, channel, base):
                     line = line.decode()
                     if line.startswith("commit_date:"):
                         ts = line.split(":", 1)[1].strip()
-                        return datetime.fromisoformat(ts)
+                        parsed = datetime.fromisoformat(ts)
+                        if verbose:
+                            click.echo(f"  commit_date for {charm} ({channel}): {parsed}")
+                        return parsed
         raise RuntimeError("commit_date not found in git-info.txt")
     finally:
         try:
@@ -80,8 +85,11 @@ def run_charmcraft_status(charm):
     return json.loads(proc.stdout)
 
 
-def get_prs(gh_base, charm_name, start_ts, end_ts, repo_path):
+def get_prs(gh_base, charm_name, start_ts, end_ts, repo_path, verbose=False):
     prs = run_gh_pr_list(gh_base, repo_path)
+    if verbose:
+        click.echo(f"Found {len(prs)} closed PRs on base {gh_base}")
+        click.echo(f"Filtering PRs between {start_ts} and {end_ts} touching {charm_name}/")
 
     def parse(ts):
         return datetime.fromisoformat(ts)
@@ -105,12 +113,13 @@ def get_prs(gh_base, charm_name, start_ts, end_ts, repo_path):
 @click.argument("base")
 @click.argument("base_branch")
 @click.option("--repo", default=".", help="Path to the git repository for the charms.")
-def list_prs(charm, source, target, base, base_branch, repo):
+@click.option("--verbose", is_flag=True, default=False, help="Print diagnostic information.")
+def list_prs(charm, source, target, base, base_branch, repo, verbose):
     """A tool to list PRs for a given charm between releases."""
-    src_ts = download_and_get_ts(charm, source, base)
-    tgt_ts = download_and_get_ts(charm, target, base)
+    src_ts = download_and_get_ts(charm, source, base, verbose=verbose)
+    tgt_ts = download_and_get_ts(charm, target, base, verbose=verbose)
 
-    matched = get_prs(base_branch, charm, src_ts, tgt_ts, repo)
+    matched = get_prs(base_branch, charm, src_ts, tgt_ts, repo, verbose=verbose)
     for pr in matched:
         print(
             f"#{pr['number']}  {pr['title']}\n{pr['url']}  closedAt: {pr['closedAt']}\n"
@@ -127,7 +136,8 @@ def list_prs(charm, source, target, base, base_branch, repo):
     default=False,
     help="Apply the release. If not present, a dry-run is performed.",
 )
-def charm_rel(source, target, base, charms, apply):
+@click.option("--verbose", is_flag=True, default=False, help="Print diagnostic information.")
+def charm_rel(source, target, base, charms, apply, verbose):
     """Release charm revisions from a source channel to a target channel."""
     for charm in charms:
         print(f"\n--- {charm} ---")
@@ -135,7 +145,11 @@ def charm_rel(source, target, base, charms, apply):
             print("Dry run mode: no changes will be made.")
 
         try:
+            if verbose:
+                click.echo(f"Fetching charmcraft status for {charm}...")
             status_data = run_charmcraft_status(charm)
+            if verbose:
+                click.echo(f"  Got {len(status_data)} track entries")
         except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
             print(f"Could not get status for charm {charm}: {e}")
             continue
@@ -146,10 +160,19 @@ def charm_rel(source, target, base, charms, apply):
                 base_info = mapping.get("base")
                 if not base_info:
                     continue
-                if base_info.get("channel") == base:
+                base_channel = base_info.get("channel")
+                if verbose:
+                    click.echo(f"  base channel={base_channel!r} (want {base!r})")
+                if base_channel == base:
                     for release in mapping.get("releases", []):
-                        if release.get("channel") == source:
+                        rel_channel = release.get("channel")
+                        if verbose:
+                            click.echo(f"    release channel={rel_channel!r} rev={release.get('revision')} (want {source!r})")
+                        if rel_channel == source:
                             revisions.append(str(release["revision"]))
+
+        if verbose:
+            click.echo(f"  Found revisions for base {base}, source {source}: {revisions}")
 
         for revision in revisions:
             if apply:
