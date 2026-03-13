@@ -17,6 +17,7 @@ from cephtools.testflinger import (
     ensure_backend_config,
     parse_submit_output,
     _parse_reservation_window,
+    _ssh_key_reference_warning,
     build_deploy_script,
     perform_remote_deploy,
     read_testenv_network_config,
@@ -56,6 +57,18 @@ def test_build_job_file_preserves_custom_ssh_key_ref() -> None:
     job_file = build_job_file(config, "ceph-qa-1", reserve_for=600)
 
     assert "    - gh:test" in job_file
+
+
+def test_ssh_key_reference_warning_for_valid_ref() -> None:
+    assert _ssh_key_reference_warning("lp:tester") is None
+    assert _ssh_key_reference_warning("gh:test-user") is None
+
+
+@pytest.mark.parametrize("value", ["tester", "lp:", "gh:", "lp: test"])
+def test_ssh_key_reference_warning_for_invalid_ref(value: str) -> None:
+    warning = _ssh_key_reference_warning(value)
+    assert warning is not None
+    assert "lp:<launchpad-id>" in warning
 
 
 @pytest.mark.parametrize(

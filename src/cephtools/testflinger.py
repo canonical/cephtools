@@ -32,6 +32,7 @@ RESERVATION_PREFIXES = [
     "Reservation will automatically timeout in ",
     "To end the reservation sooner use: testflinger-cli cancel ",
 ]
+SSH_KEY_REF_PREFIXES = {"lp", "gh"}
 
 Runner = Callable[..., subprocess.CompletedProcess]
 
@@ -51,6 +52,23 @@ class ReservationDetails:
     ip: str
     expires_at: dt.datetime
     timeout_seconds: int
+
+
+def _ssh_key_reference_warning(ssh_key_ref: str) -> str | None:
+    candidate = ssh_key_ref.strip()
+    prefix, separator, account = candidate.partition(":")
+    if (
+        separator
+        and prefix in SSH_KEY_REF_PREFIXES
+        and account
+        and account == account.strip()
+    ):
+        return None
+    return (
+        "Warning: launchpad_account should use a Testflinger ssh key reference "
+        "like 'lp:<launchpad-id>' or 'gh:<github-username>'. "
+        f"Current value '{ssh_key_ref}' may be rejected by the server."
+    )
 
 
 def _load_simple_yaml(path: Path) -> dict[str, str | None]:
@@ -526,7 +544,13 @@ def cli() -> None:  # pragma: no cover - exercised via click integration tests
     show_default=True,
     help="Path to the backend configuration file.",
 )
-@click.option("--launchpad-account", help="Launchpad account used for ssh access.")
+@click.option(
+    "--launchpad-account",
+    help=(
+        "SSH key reference used for access (for example, "
+        "'lp:<launchpad-id>' or 'gh:<github-username>')."
+    ),
+)
 @click.option("--job-tag", help="Optional job tag to include in submit jobs.")
 @click.option(
     "--mattermost-name",
@@ -557,6 +581,9 @@ def reserve(  # pragma: no cover - exercised via click integration tests
         job_tag,
         mattermost_name,
     )
+    warning = _ssh_key_reference_warning(config.launchpad_account)
+    if warning:
+        click.echo(warning, err=True)
     if created:
         return
 
@@ -589,7 +616,13 @@ def reserve(  # pragma: no cover - exercised via click integration tests
     show_default=True,
     help="Path to the backend configuration file.",
 )
-@click.option("--launchpad-account", help="Launchpad account used for ssh access.")
+@click.option(
+    "--launchpad-account",
+    help=(
+        "SSH key reference used for access (for example, "
+        "'lp:<launchpad-id>' or 'gh:<github-username>')."
+    ),
+)
 @click.option("--job-tag", help="Optional job tag to include in submit jobs.")
 @click.option(
     "--mattermost-name",
@@ -620,6 +653,9 @@ def deploy(  # pragma: no cover - exercised via click integration tests
         job_tag,
         mattermost_name,
     )
+    warning = _ssh_key_reference_warning(config.launchpad_account)
+    if warning:
+        click.echo(warning, err=True)
     if created:
         return
 

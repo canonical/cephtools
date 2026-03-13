@@ -48,9 +48,11 @@ Reserve a machine for interactive use:
 
 ```bash
 cephtools testflinger reserve [QUEUE_NAME] \
-    --launchpad-account <username> \
+    --launchpad-account <ssh-key-ref> \
     --reserve-for <seconds>
 ```
+
+`--launchpad-account` must be a Testflinger SSH key reference, for example `lp:<launchpad-id>` or `gh:<github-username>`.
 
 This submits a job to the specified queue (defaults to `ceph-qa-1`), waits for the reservation to become active, and prints the SSH connection details.
 
@@ -60,7 +62,7 @@ Reserve a machine and automatically deploy `cephtools` and its test environment 
 
 ```bash
 cephtools testflinger deploy [QUEUE_NAME] \
-    --launchpad-account <username> \
+    --launchpad-account <ssh-key-ref> \
     --reserve-for <seconds>
 ```
 
