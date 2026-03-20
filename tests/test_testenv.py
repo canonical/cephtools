@@ -200,6 +200,55 @@ def test_extract_arches():
     assert "amd64/unfinished" not in arches
 
 
+def test_dns_preflight_restarts_resolver(monkeypatch):
+    commands: list[str] = []
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        commands.append(str(cmd))
+
+        class Result:
+            stdout = ""
+
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+    monkeypatch.setattr(testenv, "_resolve_hostname", lambda host: True)
+
+    testenv.dns_preflight(hosts=("registry.terraform.io",), timeout=1, interval=1)
+
+    assert "sudo resolvectl flush-caches || true" in commands
+    assert "sudo systemctl restart systemd-resolved || true" in commands
+
+
+def test_dns_preflight_raises_when_unresolved(monkeypatch):
+    commands: list[str] = []
+    now = {"value": 0.0}
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        commands.append(str(cmd))
+
+        class Result:
+            stdout = ""
+
+        return Result()
+
+    def fake_monotonic():
+        return now["value"]
+
+    def fake_sleep(seconds: float):
+        now["value"] += seconds
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+    monkeypatch.setattr(testenv, "_resolve_hostname", lambda host: False)
+    monkeypatch.setattr(testenv.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(testenv.time, "sleep", fake_sleep)
+
+    with pytest.raises(ClickException, match="unresolved hosts: registry.terraform.io"):
+        testenv.dns_preflight(hosts=("registry.terraform.io",), timeout=2, interval=1)
+
+    assert "resolvectl status || true" in commands
+
+
 def test_create_nodes_impl_invokes_terragrunt(
     monkeypatch, tmp_path: Path, state_home: Path
 ):
