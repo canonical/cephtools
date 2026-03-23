@@ -300,6 +300,85 @@ def install_maas_deb(version: str) -> None:
     run(["sudo", "apt-get", "-y", "install", "maas"])
 
 
+def _bind9_ipv4_listen_addresses_excluding_interface(interface_name: str) -> list[str]:
+    result = run(["ip", "-j", "-4", "addr", "show"])
+    try:
+        interfaces = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
+        raise click.ClickException(
+            "Failed to parse IPv4 interface addresses as JSON."
+        ) from exc
+
+    addresses: list[str] = ["127.0.0.1"]
+    seen = {"127.0.0.1"}
+    for interface in interfaces:
+        if not isinstance(interface, dict):
+            continue
+        if interface.get("ifname") == interface_name:
+            continue
+        addr_info = interface.get("addr_info") or []
+        if not isinstance(addr_info, list):
+            continue
+        for address in addr_info:
+            if not isinstance(address, dict):
+                continue
+            if address.get("family") != "inet":
+                continue
+            local = address.get("local")
+            if not local:
+                continue
+            local = str(local)
+            if local in seen:
+                continue
+            seen.add(local)
+            addresses.append(local)
+
+    return addresses
+
+
+def configure_maas_bind9_ipv4_excluding_bridge(lxdbridge: str) -> None:
+    listen_addresses = _bind9_ipv4_listen_addresses_excluding_interface(lxdbridge)
+    rendered_addresses = " ".join(f"{address};" for address in listen_addresses)
+    desired_listen_on = f"    listen-on {{ {rendered_addresses} }};"
+    click.echo(
+        "Configuring MAAS bind9 IPv4 listen-on policy on detected addresses "
+        f"excluding {lxdbridge}: {', '.join(listen_addresses)}"
+    )
+    run(
+        "sudo python3 - <<'PY'\n"
+        "from datetime import datetime, timezone\n"
+        "from pathlib import Path\n"
+        "import re\n"
+        "import shutil\n"
+        "\n"
+        "path = Path('/etc/bind/named.conf.options')\n"
+        f"desired = {desired_listen_on!r}\n"
+        "marker = 'include \"/etc/bind/maas/named.conf.options.inside.maas\";'\n"
+        "text = path.read_text(encoding='ascii')\n"
+        "pattern = re.compile(r'^[\\t ]*listen-on\\s+\\{[^}]*\\};[\\t ]*$', re.MULTILINE)\n"
+        "if desired in text:\n"
+        "    raise SystemExit(0)\n"
+        "if pattern.search(text):\n"
+        "    new_text = pattern.sub(desired, text, count=1)\n"
+        "elif marker in text:\n"
+        "    new_text = text.replace(marker, desired + '\\n    ' + marker, 1)\n"
+        "else:\n"
+        "    idx = text.rfind('};')\n"
+        "    if idx == -1:\n"
+        "        raise SystemExit('Unable to locate options block terminator in named.conf.options')\n"
+        "    new_text = text[:idx] + desired + '\\n' + text[idx:]\n"
+        "if new_text == text:\n"
+        "    raise SystemExit(0)\n"
+        "backup = path.with_name(path.name + '.' + datetime.now(timezone.utc).isoformat())\n"
+        "shutil.copy2(path, backup)\n"
+        "path.write_text(new_text, encoding='ascii')\n"
+        "PY",
+        shell=True,
+    )
+    run(["sudo", "named-checkconf"])
+    run(["sudo", "systemctl", "reload", "bind9"])
+
+
 def ensure_lxd_network(name: str, *, ipv4_address: str | None = None) -> None:
     nets = json.loads(run("lxc query /1.0/networks").stdout)
     if f"/1.0/networks/{name}" in nets:
@@ -1077,11 +1156,22 @@ def maas_init_cmd(ctx):
     maas_login(ctx.obj["maas_url"], ctx.obj["admin"], api_key)
     time.sleep(5)
     verify_maas(ctx.obj["admin"])
+    configure_maas_bind9_ipv4_excluding_bridge(ctx.obj["lxdbridge"])
     dns_preflight()
-    click.echo("maas initialized and logged in.")
+    click.echo("maas initialized, bind9 configured, and logged in.")
     # Write cloud.yaml now; cred.yaml later in juju-init after health checks again.
     write_cloud_yaml(ctx.obj["ip"])
     click.echo("cloud.yaml written.")
+
+
+@cli.command(
+    "configure-bind9",
+    help="Configure MAAS bind9 IPv4 to listen on all interfaces except the LXD bridge.",
+)
+@click.pass_context
+def configure_bind9(ctx):
+    configure_maas_bind9_ipv4_excluding_bridge(ctx.obj["lxdbridge"])
+    click.echo("maas bind9 configured.")
 
 
 @cli.command("register-vm-host", help="Register local LXD as MAAS VM host.")
