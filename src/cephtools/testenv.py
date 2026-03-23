@@ -37,6 +37,10 @@ EXT_LXD_NETWORK = "ext"
 EXTERNAL_SPACE_NAME = "external"
 JUJU_SPACE_NAME = "jujuspace"
 ENSURE_NODES_INPUT_FILENAME = "ensure-nodes.hcl"
+MAAS_DB_NAME = "maasdb"
+MAAS_DB_USER = "maas"
+MAAS_DB_HOST = "localhost"
+MAAS_DB_PORT = "5432"
 DNS_PRECHECK_HOSTS = (
     "archive.ubuntu.com",
     "security.ubuntu.com",
@@ -294,7 +298,16 @@ def lxd_ready():
 
 
 def install_maas_deb(version: str) -> None:
-    run(["sudo", "apt-get", "-y", "install", "software-properties-common"])
+    run(
+        [
+            "sudo",
+            "apt-get",
+            "-y",
+            "install",
+            "software-properties-common",
+            "postgresql",
+        ]
+    )
     run(["sudo", "apt-add-repository", "-y", f"ppa:maas/{version}"])
     run(["sudo", "apt-get", "update"])
     run(["sudo", "apt-get", "-y", "install", "maas"])
@@ -525,36 +538,155 @@ def dns_preflight(
     click.echo("DNS preflight checks passed.")
 
 
+def _sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _sql_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _maas_local_config() -> dict[str, object]:
+    result = run(["sudo", "maas-region", "local_config_get", "--json"], quiet=True)
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
+        raise click.ClickException(
+            "Failed to parse MAAS local configuration as JSON."
+        ) from exc
+    if not isinstance(payload, dict):  # pragma: no cover - defensive
+        raise click.ClickException("MAAS local configuration has unexpected format.")
+    return payload
+
+
 def _maas_is_initialized() -> bool:
-    status = run("sudo maas status", check=False, quiet=True)
-    if status.returncode != 0:
-        return False
-    output = (status.stdout or "").strip().lower()
-    if "maas is not running" in output or "maas is not initialised" in output:
-        return False
-    return True
+    return bool(_maas_local_config())
+
+
+def _postgres_role_exists(role: str) -> bool:
+    result = run(
+        [
+            "sudo",
+            "-u",
+            "postgres",
+            "psql",
+            "-tAc",
+            f"SELECT 1 FROM pg_roles WHERE rolname={_sql_literal(role)}",
+        ],
+        quiet=True,
+    )
+    return result.stdout.strip() == "1"
+
+
+def _postgres_database_exists(name: str) -> bool:
+    result = run(
+        [
+            "sudo",
+            "-u",
+            "postgres",
+            "psql",
+            "-tAc",
+            f"SELECT 1 FROM pg_database WHERE datname={_sql_literal(name)}",
+        ],
+        quiet=True,
+    )
+    return result.stdout.strip() == "1"
+
+
+def _ensure_maas_postgres(password: str) -> None:
+    run(["sudo", "systemctl", "disable", "--now", "systemd-timesyncd"], check=False)
+
+    role = _sql_identifier(MAAS_DB_USER)
+    password_sql = _sql_literal(password)
+    if _postgres_role_exists(MAAS_DB_USER):
+        run(
+            [
+                "sudo",
+                "-u",
+                "postgres",
+                "psql",
+                "-c",
+                f"ALTER USER {role} WITH ENCRYPTED PASSWORD {password_sql}",
+            ]
+        )
+    else:
+        run(
+            [
+                "sudo",
+                "-u",
+                "postgres",
+                "psql",
+                "-c",
+                f"CREATE USER {role} WITH ENCRYPTED PASSWORD {password_sql}",
+            ]
+        )
+
+    if not _postgres_database_exists(MAAS_DB_NAME):
+        run(["sudo", "-u", "postgres", "createdb", "-O", MAAS_DB_USER, MAAS_DB_NAME])
+
+
+def _configure_maas_region(maas_url: str, db_password: str) -> None:
+    run(
+        [
+            "sudo",
+            "maas-region",
+            "local_config_set",
+            "--database-host",
+            MAAS_DB_HOST,
+            "--database-port",
+            MAAS_DB_PORT,
+            "--database-name",
+            MAAS_DB_NAME,
+            "--database-user",
+            MAAS_DB_USER,
+            "--database-pass",
+            db_password,
+            "--maas-url",
+            maas_url,
+        ]
+    )
+    run(["sudo", "maas-region", "dbupgrade"])
+    for service in ("maas-regiond", "maas-rackd", "maas-apiserver", "maas-http"):
+        run(["sudo", "systemctl", "restart", service], check=False)
+
+
+def _maas_admin_exists(admin: str) -> bool:
+    result = run(f"sudo maas apikey --username {admin}", check=False, quiet=True)
+    return result.returncode == 0 and bool((result.stdout or "").strip())
 
 
 def maas_init_impl(maas_url, admin, admin_pw, admin_mail):
     already_initialized = _maas_is_initialized()
     if already_initialized:
-        print("MAAS already initialized; skipping 'maas init'")
-        return
+        print("MAAS already configured; ensuring database settings, services, and admin user.")
+
+    _ensure_maas_postgres(admin_pw)
+    _configure_maas_region(maas_url, admin_pw)
+
     try:
-        run(
-            "sudo maas init region+rack --database-uri maas-test-db:/// "
-            f"--admin-username {admin} --admin-password {admin_pw} "
-            f"--admin-email {admin_mail} --maas-url {maas_url}"
-        )
-        time.sleep(10)
+        run(["sudo", "maas", "init", "--skip-admin"])
     except subprocess.CalledProcessError as e:
-        print(e.stderr.strip())
-    try:
-        run(
-            f"sudo maas createadmin --username {admin} --password {admin_pw} --email {admin_mail}"
-        )
-    except subprocess.CalledProcessError as e:
-        print(e.stderr.strip())
+        print((e.stderr or "").strip())
+
+    if not _maas_admin_exists(admin):
+        try:
+            run(
+                [
+                    "sudo",
+                    "maas",
+                    "createadmin",
+                    "--username",
+                    admin,
+                    "--password",
+                    admin_pw,
+                    "--email",
+                    admin_mail,
+                ]
+            )
+        except subprocess.CalledProcessError as e:
+            print((e.stderr or "").strip())
+
+    time.sleep(10)
 
 
 def maas_api_key(admin) -> str:
@@ -569,13 +701,32 @@ def maas_login(maas_url, admin, api_key):
 def verify_maas(admin):
     import re
 
-    status = run("sudo maas status").stdout.lower()
-    regiond_ok = re.search(
-        r"regiond(?::regiond-\d+)?\s+(enabled\s+active|running)\b", status
-    )
-    rackd_ok = re.search(r"rackd\s+(enabled\s+active|running)\b", status)
-    if not regiond_ok or not rackd_ok:
-        raise RuntimeError("MAAS services not running (regiond/rackd must be active)")
+    status = run("sudo maas status", check=False, quiet=True)
+    if status.returncode == 0:
+        output = (status.stdout or "").lower()
+        regiond_ok = re.search(
+            r"regiond(?::regiond-\d+)?\s+(enabled\s+active|running)\b", output
+        )
+        rackd_ok = re.search(r"rackd\s+(enabled\s+active|running)\b", output)
+        if not regiond_ok or not rackd_ok:
+            raise RuntimeError(
+                "MAAS services not running (regiond/rackd must be active)"
+            )
+    else:
+        regiond = run(
+            ["sudo", "systemctl", "is-active", "--quiet", "maas-regiond"],
+            check=False,
+            quiet=True,
+        )
+        rackd = run(
+            ["sudo", "systemctl", "is-active", "--quiet", "maas-rackd"],
+            check=False,
+            quiet=True,
+        )
+        if regiond.returncode != 0 or rackd.returncode != 0:
+            raise RuntimeError(
+                "MAAS services not running (maas-regiond/maas-rackd must be active)"
+            )
     _ = run(f"maas {admin} boot-resources read").stdout
 
 
@@ -1136,12 +1287,11 @@ def cli(ctx, admin, admin_pw, admin_mail, maas_version, lxdbridge, vmhost):
 
 @cli.command(
     "install-deps",
-    help="Install MAAS from debs, maas-test-db from snap, plus lxd, terraform, and terragrunt.",
+    help="Install MAAS from debs with PostgreSQL, plus lxd, terraform, and terragrunt.",
 )
 @click.pass_context
 def install_deps(ctx):
     install_maas_deb(ctx.obj["maas_version"])
-    ensure_snap("maas-test-db")
     ensure_snap("lxd")
     ensure_snap("terraform", classic=True)
     ensure_terragrunt()
@@ -1159,7 +1309,8 @@ def lxd_init_cmd(ctx):
 
 
 @cli.command(
-    "maas-init", help="Initialize MAAS (region+rack), create admin, and login."
+    "maas-init",
+    help="Configure PostgreSQL-backed MAAS, create admin, and login.",
 )
 @click.pass_context
 def maas_init_cmd(ctx):

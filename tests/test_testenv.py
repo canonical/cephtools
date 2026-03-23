@@ -197,10 +197,69 @@ def test_install_maas_deb(monkeypatch):
     testenv.install_maas_deb("3.7")
 
     assert commands == [
-        ["sudo", "apt-get", "-y", "install", "software-properties-common"],
+        [
+            "sudo",
+            "apt-get",
+            "-y",
+            "install",
+            "software-properties-common",
+            "postgresql",
+        ],
         ["sudo", "apt-add-repository", "-y", "ppa:maas/3.7"],
         ["sudo", "apt-get", "update"],
         ["sudo", "apt-get", "-y", "install", "maas"],
+    ]
+
+
+def test_maas_init_impl_configures_postgres_backed_maas(monkeypatch):
+    calls: list[object] = []
+
+    monkeypatch.setattr(testenv, "_maas_is_initialized", lambda: False)
+    monkeypatch.setattr(
+        testenv,
+        "_ensure_maas_postgres",
+        lambda password: calls.append(("postgres", password)),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_configure_maas_region",
+        lambda maas_url, db_password: calls.append(("region", maas_url, db_password)),
+    )
+    monkeypatch.setattr(testenv, "_maas_admin_exists", lambda admin: False)
+    monkeypatch.setattr(testenv.time, "sleep", lambda seconds: None)
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        calls.append(cmd)
+
+        class Result:
+            stdout = ""
+
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    testenv.maas_init_impl(
+        "http://10.0.0.1:5240/MAAS",
+        "admin",
+        "secret",
+        "ops@example.com",
+    )
+
+    assert calls == [
+        ("postgres", "secret"),
+        ("region", "http://10.0.0.1:5240/MAAS", "secret"),
+        ["sudo", "maas", "init", "--skip-admin"],
+        [
+            "sudo",
+            "maas",
+            "createadmin",
+            "--username",
+            "admin",
+            "--password",
+            "secret",
+            "--email",
+            "ops@example.com",
+        ],
     ]
 
 
@@ -374,6 +433,7 @@ def test_verify_maas_accepts_running_status(monkeypatch):
 
         class Result:
             stdout = ""
+            returncode = 0
 
         if cmd == "sudo maas status":
             Result.stdout = (
@@ -389,6 +449,38 @@ def test_verify_maas_accepts_running_status(monkeypatch):
     testenv.verify_maas("admin")
 
     assert commands == ["sudo maas status", "maas admin boot-resources read"]
+
+
+def test_verify_maas_falls_back_to_systemctl(monkeypatch):
+    commands: list[object] = []
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        commands.append(cmd)
+
+        class Result:
+            stdout = ""
+            returncode = 0
+
+        if cmd == "sudo maas status":
+            Result.returncode = 2
+        elif cmd == ["sudo", "systemctl", "is-active", "--quiet", "maas-regiond"]:
+            Result.returncode = 0
+        elif cmd == ["sudo", "systemctl", "is-active", "--quiet", "maas-rackd"]:
+            Result.returncode = 0
+        elif cmd == "maas admin boot-resources read":
+            Result.stdout = "[]"
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    testenv.verify_maas("admin")
+
+    assert commands == [
+        "sudo maas status",
+        ["sudo", "systemctl", "is-active", "--quiet", "maas-regiond"],
+        ["sudo", "systemctl", "is-active", "--quiet", "maas-rackd"],
+        "maas admin boot-resources read",
+    ]
 
 
 def test_extract_arches():
