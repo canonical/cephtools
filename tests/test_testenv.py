@@ -204,6 +204,74 @@ def test_install_maas_deb(monkeypatch):
     ]
 
 
+def test_lxd_init_impl_stops_and_restarts_bind9(monkeypatch):
+    commands: list[object] = []
+    echoes: list[str] = []
+    ensured_networks: list[str] = []
+    sleeps: list[float] = []
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        commands.append((cmd, check, shell))
+
+        class Result:
+            stdout = ""
+
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+    monkeypatch.setattr(
+        testenv, "ensure_lxd_network", lambda name, ipv4_address=None: ensured_networks.append(name)
+    )
+    monkeypatch.setattr(testenv.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(testenv.click, "echo", lambda message, **kwargs: echoes.append(message))
+
+    testenv.lxd_init_impl("10.0.0.1", "secret", "lxdbr0")
+
+    assert commands[0] == (["sudo", "systemctl", "stop", "bind9"], False, False)
+    assert commands[1] == ("sudo snap set lxd daemon.user.group=adm", True, False)
+    assert commands[2] == (
+        "sudo lxd init --auto --trust-password=secret --network-address=10.0.0.1 --network-port=8443 || true",
+        True,
+        True,
+    )
+    assert commands[3] == ("lxc config set core.https_address :8443 || true", True, True)
+    assert commands[4] == ("lxc network set lxdbr0 dns.mode=none || true", True, True)
+    assert commands[5] == ("lxc network set lxdbr0 ipv4.dhcp=false || true", True, True)
+    assert commands[6] == ("lxc network set lxdbr0 ipv6.dhcp=false || true", True, True)
+    assert commands[7] == (["sudo", "systemctl", "start", "bind9"], False, False)
+    assert ensured_networks == [testenv.EXT_LXD_NETWORK]
+    assert sleeps == [2]
+    assert echoes == [
+        "Stopping bind9 temporarily so LXD bridge setup can claim port 53...",
+        "Starting bind9 again after LXD bridge setup...",
+    ]
+
+
+def test_lxd_init_impl_restarts_bind9_on_failure(monkeypatch):
+    commands: list[object] = []
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        commands.append((cmd, check, shell))
+        if cmd == "sudo snap set lxd daemon.user.group=adm":
+            raise RuntimeError("boom")
+
+        class Result:
+            stdout = ""
+
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        testenv.lxd_init_impl("10.0.0.1", "secret", "lxdbr0")
+
+    assert commands == [
+        (["sudo", "systemctl", "stop", "bind9"], False, False),
+        ("sudo snap set lxd daemon.user.group=adm", True, False),
+        (["sudo", "systemctl", "start", "bind9"], False, False),
+    ]
+
+
 def test_bind9_ipv4_listen_addresses_excluding_interface(monkeypatch):
     def fake_run(cmd, check=True, shell=False, quiet=False):
         assert cmd == ["ip", "-j", "-4", "addr", "show"]

@@ -390,18 +390,36 @@ def ensure_lxd_network(name: str, *, ipv4_address: str | None = None) -> None:
     )
 
 
+def _stop_bind9_for_lxd_setup() -> None:
+    click.echo("Stopping bind9 temporarily so LXD bridge setup can claim port 53...")
+    run(["sudo", "systemctl", "stop", "bind9"], check=False)
+
+
+def _start_bind9_after_lxd_setup() -> None:
+    click.echo("Starting bind9 again after LXD bridge setup...")
+    run(["sudo", "systemctl", "start", "bind9"], check=False)
+
+
 def lxd_init_impl(ip, admin_pw, lxdbridge):
-    run("sudo snap set lxd daemon.user.group=adm")
-    run(
-        f"sudo lxd init --auto --trust-password={shlex.quote(admin_pw)} "
-        f"--network-address={ip} --network-port=8443 || true",
-        shell=True,
-    )
-    run("lxc config set core.https_address :8443 || true", shell=True)
-    for k, v in [("dns.mode", "none"), ("ipv4.dhcp", "false"), ("ipv6.dhcp", "false")]:
-        run(f"lxc network set {lxdbridge} {k}={v} || true", shell=True)
-    ensure_lxd_network(EXT_LXD_NETWORK)
-    time.sleep(2)
+    _stop_bind9_for_lxd_setup()
+    try:
+        run("sudo snap set lxd daemon.user.group=adm")
+        run(
+            f"sudo lxd init --auto --trust-password={shlex.quote(admin_pw)} "
+            f"--network-address={ip} --network-port=8443 || true",
+            shell=True,
+        )
+        run("lxc config set core.https_address :8443 || true", shell=True)
+        for k, v in [
+            ("dns.mode", "none"),
+            ("ipv4.dhcp", "false"),
+            ("ipv6.dhcp", "false"),
+        ]:
+            run(f"lxc network set {lxdbridge} {k}={v} || true", shell=True)
+        ensure_lxd_network(EXT_LXD_NETWORK)
+        time.sleep(2)
+    finally:
+        _start_bind9_after_lxd_setup()
 
 
 def verify_lxd(lxdbridge):
