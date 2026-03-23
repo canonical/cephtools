@@ -52,7 +52,7 @@ def test_load_testenv_defaults_overrides_from_config(state_home: Path) -> None:
                 "cephtools:",
                 "  terraform_root: ~/custom",
                 "  testenv:",
-                "    maas_ch: custom/channel",
+                '    maas_version: "3.8"',
                 "    admin: admin",
                 "    admin_pw: secret",
                 "    admin_mail: ops@example.com",
@@ -67,7 +67,7 @@ def test_load_testenv_defaults_overrides_from_config(state_home: Path) -> None:
     defaults = config.load_testenv_defaults()
 
     assert defaults == {
-        "maas_ch": "custom/channel",
+        "maas_version": "3.8",
         "admin": "admin",
         "admin_pw": "secret",
         "admin_mail": "ops@example.com",
@@ -75,3 +75,53 @@ def test_load_testenv_defaults_overrides_from_config(state_home: Path) -> None:
         "vmhost": "lab-host",
         "maas_tag": "custom-tag",
     }
+
+
+def test_load_testenv_defaults_maps_legacy_maas_ch(state_home: Path) -> None:
+    cfg_path = state_home / config.CONFIG_FILENAME
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "cephtools:",
+                "  testenv:",
+                "    maas_ch: 3.6/stable",
+                "",
+            ]
+        )
+    )
+
+    defaults = config.load_testenv_defaults()
+
+    assert defaults["maas_version"] == "3.6"
+    assert "maas_ch" not in defaults
+
+
+def test_load_testenv_defaults_requires_quoted_maas_version(
+    state_home: Path,
+) -> None:
+    cfg_path = state_home / config.CONFIG_FILENAME
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "cephtools:",
+                "  testenv:",
+                "    maas_version: 3.10",
+                "",
+            ]
+        )
+    )
+
+    with pytest.raises(config.click.ClickException) as excinfo:
+        config.load_testenv_defaults()
+
+    assert "must be a quoted string" in str(excinfo.value)
+
+
+def test_write_default_config_quotes_maas_version(state_home: Path) -> None:
+    cfg_path = state_home / config.CONFIG_FILENAME
+
+    config.load_cephtools_config(ensure=True)
+
+    assert 'maas_version: "3.7"' in cfg_path.read_text()

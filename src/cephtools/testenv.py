@@ -286,6 +286,13 @@ def lxd_ready():
         print(e.stderr)
 
 
+def install_maas_deb(version: str) -> None:
+    run(["sudo", "apt-get", "-y", "install", "software-properties-common"])
+    run(["sudo", "apt-add-repository", "-y", f"ppa:maas/{version}"])
+    run(["sudo", "apt-get", "update"])
+    run(["sudo", "apt-get", "-y", "install", "maas"])
+
+
 def ensure_lxd_network(name: str, *, ipv4_address: str | None = None) -> None:
     nets = json.loads(run("lxc query /1.0/networks").stdout)
     if f"/1.0/networks/{name}" in nets:
@@ -405,12 +412,12 @@ def verify_maas(admin):
     import re
 
     status = run("sudo maas status").stdout.lower()
-    regiond_ok = re.search(r"regiond\s+enabled\s+active", status)
-    rackd_ok = re.search(r"rackd\s+enabled\s+active", status)
+    regiond_ok = re.search(
+        r"regiond(?::regiond-\d+)?\s+(enabled\s+active|running)\b", status
+    )
+    rackd_ok = re.search(r"rackd\s+(enabled\s+active|running)\b", status)
     if not regiond_ok or not rackd_ok:
-        raise RuntimeError(
-            "MAAS services not running (regiond/rackd must be enabled and active)"
-        )
+        raise RuntimeError("MAAS services not running (regiond/rackd must be active)")
     _ = run(f"maas {admin} boot-resources read").stdout
 
 
@@ -937,10 +944,10 @@ def _destroy_nodes_impl() -> None:
     help="MAAS admin email",
 )
 @click.option(
-    "--maas-ch",
-    default=DEFAULTS["maas_ch"],
+    "--maas-version",
+    default=DEFAULTS["maas_version"],
     show_default=True,
-    help="Snap channel for MAAS",
+    help="MAAS PPA version, e.g. 3.7",
 )
 @click.option(
     "--lxdbridge",
@@ -955,13 +962,13 @@ def _destroy_nodes_impl() -> None:
     help="VM host name in MAAS",
 )
 @click.pass_context
-def cli(ctx, admin, admin_pw, admin_mail, maas_ch, lxdbridge, vmhost):
+def cli(ctx, admin, admin_pw, admin_mail, maas_version, lxdbridge, vmhost):
     ctx.ensure_object(dict)
     ctx.obj.update(
         admin=admin,
         admin_pw=admin_pw,
         admin_mail=admin_mail,
-        maas_ch=maas_ch,
+        maas_version=maas_version,
         lxdbridge=lxdbridge,
         vmhost=vmhost,
         ip=primary_ip(),
@@ -971,11 +978,11 @@ def cli(ctx, admin, admin_pw, admin_mail, maas_ch, lxdbridge, vmhost):
 
 @cli.command(
     "install-deps",
-    help="Install snaps and tools: maas, maas-test-db, lxd, terraform, terragrunt.",
+    help="Install MAAS from debs, maas-test-db from snap, plus lxd, terraform, and terragrunt.",
 )
 @click.pass_context
 def install_deps(ctx):
-    ensure_snap("maas", channel=ctx.obj["maas_ch"])
+    install_maas_deb(ctx.obj["maas_version"])
     ensure_snap("maas-test-db")
     ensure_snap("lxd")
     ensure_snap("terraform", classic=True)

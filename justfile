@@ -22,6 +22,11 @@ lint:
 unittest *ARGS:
 	UV_CACHE_DIR=.uv-cache {{UV}} run pytest {{ARGS}}
 
+# Alias for unittest
+# Extra args forwarded, e.g.: just test -k foo -q
+test *ARGS:
+	UV_CACHE_DIR=.uv-cache {{UV}} run pytest {{ARGS}}
+
 # Build a standalone PEX installer
 build-pex OUTPUT="dist/cephtools":
 	scripts/build_pex.sh {{OUTPUT}}

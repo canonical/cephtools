@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,7 @@ DEFAULT_TESTFLINGER_DEPLOY_RESERVE_FOR = 21600
 DEFAULT_JUJU_MODEL = "cephtools"
 
 _TESTENV_DEFAULTS_FALLBACK: dict[str, str] = {
-    "maas_ch": "3.6/stable",
+    "maas_version": "3.7",
     "admin": "admin",
     "admin_pw": "maaspass",
     "admin_mail": "admin@example.com",
@@ -61,7 +62,10 @@ def _write_default_config(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     testenv_lines = [
         "  testenv:",
-        *[f"    {key}: {value}" for key, value in _TESTENV_DEFAULTS_FALLBACK.items()],
+        *[
+            f"    {key}: {json.dumps(value)}"
+            for key, value in _TESTENV_DEFAULTS_FALLBACK.items()
+        ],
     ]
     content = "\n".join(
         [
@@ -131,12 +135,26 @@ def load_testenv_defaults(path: Path | None = None) -> dict[str, str]:
         )
 
     defaults = _TESTENV_DEFAULTS_FALLBACK.copy()
+    legacy_maas_channel: str | None = None
+
     for key, value in testenv_section.items():
         if value is None:
             continue
+        if key == "maas_version" and not isinstance(value, str):
+            raise click.ClickException(
+                "Configuration value 'testenv.maas_version' must be a quoted "
+                'string (for example "3.7") to avoid YAML numeric coercion.'
+            )
         if not isinstance(value, str):
             raise click.ClickException(
                 f"Configuration value 'testenv.{key}' must be a string."
             )
+        if key == "maas_ch":
+            legacy_maas_channel = value
+            continue
         defaults[key] = value
+
+    if "maas_version" not in testenv_section and legacy_maas_channel:
+        defaults["maas_version"] = legacy_maas_channel.split("/", 1)[0]
+
     return defaults

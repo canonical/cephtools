@@ -181,6 +181,54 @@ def test_wait_for_vm_host_architecture_timeout(monkeypatch):
         )
 
 
+def test_install_maas_deb(monkeypatch):
+    commands: list[object] = []
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        commands.append(cmd)
+
+        class Result:
+            stdout = ""
+
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    testenv.install_maas_deb("3.7")
+
+    assert commands == [
+        ["sudo", "apt-get", "-y", "install", "software-properties-common"],
+        ["sudo", "apt-add-repository", "-y", "ppa:maas/3.7"],
+        ["sudo", "apt-get", "update"],
+        ["sudo", "apt-get", "-y", "install", "maas"],
+    ]
+
+
+def test_verify_maas_accepts_running_status(monkeypatch):
+    commands: list[str] = []
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        commands.append(cmd)
+
+        class Result:
+            stdout = ""
+
+        if cmd == "sudo maas status":
+            Result.stdout = (
+                "rackd                            RUNNING   pid 8000\n"
+                "regiond:regiond-0                RUNNING   pid 8003\n"
+            )
+        elif cmd == "maas admin boot-resources read":
+            Result.stdout = "[]"
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    testenv.verify_maas("admin")
+
+    assert commands == ["sudo maas status", "maas admin boot-resources read"]
+
+
 def test_extract_arches():
     resources = [
         {"type": "Syncing", "architecture": "amd64/unfinished"},
