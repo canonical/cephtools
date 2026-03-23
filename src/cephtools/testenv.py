@@ -37,6 +37,13 @@ EXT_LXD_NETWORK = "ext"
 EXTERNAL_SPACE_NAME = "external"
 JUJU_SPACE_NAME = "jujuspace"
 ENSURE_NODES_INPUT_FILENAME = "ensure-nodes.hcl"
+DNS_PRECHECK_HOSTS = (
+    "archive.ubuntu.com",
+    "security.ubuntu.com",
+    "registry.terraform.io",
+)
+DNS_PRECHECK_TIMEOUT_SECONDS = 120
+DNS_PRECHECK_INTERVAL_SECONDS = 5
 
 
 def _format_juju_error(exc: jubilant.CLIError) -> str:
@@ -365,6 +372,60 @@ def lxd_warmup():
 
     finally:
         run(f"lxc delete {vm_name} --force", check=False)
+
+
+def _restart_system_resolver() -> None:
+    run("sudo resolvectl flush-caches || true", shell=True, check=False)
+    run("sudo systemctl restart systemd-resolved || true", shell=True, check=False)
+
+
+def _resolve_hostname(hostname: str) -> bool:
+    try:
+        socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False
+    return True
+
+
+def dns_preflight(
+    *,
+    hosts: tuple[str, ...] = DNS_PRECHECK_HOSTS,
+    timeout: int = DNS_PRECHECK_TIMEOUT_SECONDS,
+    interval: int = DNS_PRECHECK_INTERVAL_SECONDS,
+) -> None:
+    click.echo("Restarting resolver and running DNS preflight checks...")
+    _restart_system_resolver()
+
+    unresolved = set(hosts)
+    deadline = time.monotonic() + timeout
+    attempt = 0
+
+    while unresolved and time.monotonic() < deadline:
+        attempt += 1
+        for host in list(unresolved):
+            if _resolve_hostname(host):
+                unresolved.remove(host)
+
+        if unresolved:
+            click.echo(
+                "DNS preflight attempt "
+                f"{attempt} pending hosts: {', '.join(sorted(unresolved))}"
+            )
+            time.sleep(interval)
+
+    if unresolved:
+        unresolved_hosts = ", ".join(sorted(unresolved))
+        resolver_status = run(
+            "resolvectl status || true", shell=True, check=False, quiet=True
+        )
+        if resolver_status.stdout:
+            click.echo(resolver_status.stdout)
+        raise click.ClickException(
+            "DNS preflight failed; unresolved hosts: "
+            f"{unresolved_hosts}. Check resolver and network egress."
+        )
+
+    click.echo("DNS preflight checks passed.")
 
 
 def _maas_is_initialized() -> bool:
@@ -1005,6 +1066,7 @@ def lxd_init_cmd(ctx):
 )
 @click.pass_context
 def maas_init_cmd(ctx):
+    dns_preflight()
     maas_init_impl(
         ctx.obj["maas_url"],
         ctx.obj["admin"],
@@ -1015,6 +1077,7 @@ def maas_init_cmd(ctx):
     maas_login(ctx.obj["maas_url"], ctx.obj["admin"], api_key)
     time.sleep(5)
     verify_maas(ctx.obj["admin"])
+    dns_preflight()
     click.echo("maas initialized and logged in.")
     # Write cloud.yaml now; cred.yaml later in juju-init after health checks again.
     write_cloud_yaml(ctx.obj["ip"])
