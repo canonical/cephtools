@@ -205,6 +205,7 @@ def test_install_maas_deb(monkeypatch):
             "software-properties-common",
             "postgresql",
         ],
+        ["sudo", "apt-get", "-y", "remove", "systemd-timesyncd"],
         ["sudo", "apt-add-repository", "-y", "ppa:maas/3.7"],
         ["sudo", "apt-get", "update"],
         ["sudo", "apt-get", "-y", "install", "maas"],
@@ -265,6 +266,52 @@ def test_maas_init_impl_configures_postgres_backed_maas(monkeypatch):
             "--email",
             "ops@example.com",
         ],
+    ]
+
+
+def test_configure_maas_region_restarts_temporal_services(monkeypatch):
+    calls: list[object] = []
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        calls.append((cmd, check))
+
+        class Result:
+            stdout = ""
+
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    testenv._configure_maas_region("http://10.0.0.1:5240/MAAS", "secret")
+
+    assert calls == [
+        (
+            [
+                "sudo",
+                "maas-region",
+                "local_config_set",
+                "--database-host",
+                testenv.MAAS_DB_HOST,
+                "--database-port",
+                testenv.MAAS_DB_PORT,
+                "--database-name",
+                testenv.MAAS_DB_NAME,
+                "--database-user",
+                testenv.MAAS_DB_USER,
+                "--database-pass",
+                "secret",
+                "--maas-url",
+                "http://10.0.0.1:5240/MAAS",
+            ],
+            True,
+        ),
+        (["sudo", "maas-region", "dbupgrade"], True),
+        (["sudo", "systemctl", "restart", "maas-regiond"], False),
+        (["sudo", "systemctl", "restart", "maas-rackd"], False),
+        (["sudo", "systemctl", "restart", "maas-apiserver"], False),
+        (["sudo", "systemctl", "restart", "maas-http"], False),
+        (["sudo", "systemctl", "restart", "maas-temporal"], False),
+        (["sudo", "systemctl", "restart", "maas-temporal-worker"], False),
     ]
 
 

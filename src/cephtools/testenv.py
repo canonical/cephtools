@@ -308,6 +308,10 @@ def install_maas_deb(version: str) -> None:
             "postgresql",
         ]
     )
+    run(
+        ["sudo", "apt-get", "-y", "remove", "systemd-timesyncd"],
+        check=False,
+    )
     run(["sudo", "apt-add-repository", "-y", f"ppa:maas/{version}"])
     run(["sudo", "apt-get", "update"])
     run(["sudo", "apt-get", "-y", "install", "maas"])
@@ -657,7 +661,14 @@ def _configure_maas_region(maas_url: str, db_password: str) -> None:
         ]
     )
     run(["sudo", "maas-region", "dbupgrade"])
-    for service in ("maas-regiond", "maas-rackd", "maas-apiserver", "maas-http"):
+    for service in (
+        "maas-regiond",
+        "maas-rackd",
+        "maas-apiserver",
+        "maas-http",
+        "maas-temporal",
+        "maas-temporal-worker",
+    ):
         run(["sudo", "systemctl", "restart", service], check=False)
 
 
