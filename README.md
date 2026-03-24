@@ -73,6 +73,22 @@ This command:
 
 Once complete, it provides the SSH command to access the ready-to-use test environment.
 
+### Cancel a reservation
+
+Cancel an active Testflinger reservation by job id:
+
+```bash
+cephtools testflinger cancel <job-id>
+```
+
+Or cancel the latest reservation previously created by `cephtools testflinger reserve` or `cephtools testflinger deploy`:
+
+```bash
+cephtools testflinger cancel --latest
+```
+
+This is a thin wrapper around `testflinger cancel <job-id>`.
+
 
 ## Testenv bootstrap (`cephtools testenv`)
 

@@ -23,6 +23,7 @@ from cephtools.state import get_state_file
 DEFAULT_CONFIG_PATH = DEFAULT_TESTFLINGER_CONFIG_PATH
 DEFAULT_RESERVE_FOR = DEFAULT_TESTFLINGER_RESERVE_FOR
 DEFAULT_DEPLOY_RESERVE_FOR = DEFAULT_TESTFLINGER_DEPLOY_RESERVE_FOR
+LATEST_RESERVATION_STATE_FILENAME = "testflinger-latest.yaml"
 
 RESERVATION_PREFIXES = [
     "*** TESTFLINGER SYSTEM RESERVED ***",
@@ -235,6 +236,62 @@ def save_backend_config(path: Path, config: BackendConfig) -> None:
     path.write_text("\n".join(lines))
 
 
+def latest_reservation_state_path() -> Path:
+    return get_state_file(LATEST_RESERVATION_STATE_FILENAME)
+
+
+def save_latest_reservation(details: ReservationDetails) -> None:
+    path = latest_reservation_state_path()
+    lines = [
+        "reservation:",
+        f"  job_id: {json.dumps(details.job_id)}",
+        f"  queue_name: {json.dumps(details.queue_name)}",
+        f"  user: {json.dumps(details.user)}",
+        f"  ip: {json.dumps(details.ip)}",
+        f"  expires_at: {json.dumps(details.expires_at.isoformat())}",
+        f"  timeout_seconds: {details.timeout_seconds}",
+        "",
+    ]
+    path.write_text("\n".join(lines))
+
+
+def load_latest_reservation_job_id(path: Path | None = None) -> str:
+    target = Path(path) if path is not None else latest_reservation_state_path()
+    target = target.expanduser()
+    if not target.exists():
+        raise click.ClickException(
+            "No saved Testflinger reservation found. Pass JOB_ID or reserve a queue first."
+        )
+    data = load_nested_yaml(target)
+    reservation = data.get("reservation")
+    if not isinstance(reservation, dict):
+        raise click.ClickException(
+            f"{target} has unexpected structure for the 'reservation' section."
+        )
+    job_id = reservation.get("job_id")
+    if not isinstance(job_id, str) or not job_id.strip():
+        raise click.ClickException(f"{target} is missing a valid reservation.job_id.")
+    return job_id
+
+
+def clear_latest_reservation(
+    job_id: str | None = None, path: Path | None = None
+) -> None:
+    target = Path(path) if path is not None else latest_reservation_state_path()
+    target = target.expanduser()
+    if not target.exists():
+        return
+    if job_id is None:
+        target.unlink(missing_ok=True)
+        return
+    try:
+        latest_job_id = load_latest_reservation_job_id(target)
+    except click.ClickException:
+        return
+    if latest_job_id == job_id:
+        target.unlink(missing_ok=True)
+
+
 def ensure_backend_config(
     path: Path,
     launchpad_account: str | None,
@@ -336,6 +393,25 @@ def submit_reserve_job(
         message = stderr or stdout or "testflinger submit failed"
         raise click.ClickException(message)
     return parse_submit_output(result.stdout or "")
+
+
+def cancel_reservation(
+    job_id: str,
+    runner: Runner,
+    testflinger_bin: str,
+) -> subprocess.CompletedProcess:
+    result = runner(
+        [testflinger_bin, "cancel", job_id],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        message = stderr or stdout or "testflinger cancel failed"
+        raise click.ClickException(message)
+    return result
 
 
 def _parse_reservation_window(
@@ -595,6 +671,7 @@ def reserve(  # pragma: no cover - exercised via click integration tests
         runner=subprocess.run,
         echo=click.echo,
     )
+    save_latest_reservation(details)
 
     print_reservation_summary(details, testflinger_bin, click.echo)
 
@@ -667,6 +744,7 @@ def deploy(  # pragma: no cover - exercised via click integration tests
         runner=subprocess.run,
         echo=click.echo,
     )
+    save_latest_reservation(details)
 
     print_reservation_summary(details, testflinger_bin, click.echo)
 
@@ -687,3 +765,40 @@ def deploy(  # pragma: no cover - exercised via click integration tests
 
     click.echo("Remote deployment succeeded. Testenv should now be installed.")
     click.echo(f"Connect with: {_build_ssh_command(details)}")
+
+
+@cli.command("cancel")
+@click.argument("job_id", required=False)
+@click.option(
+    "--latest",
+    is_flag=True,
+    help="Cancel the latest saved Testflinger reservation.",
+)
+@click.option(
+    "--testflinger-bin",
+    default="testflinger",
+    show_default=True,
+    help="Path to the testflinger CLI binary.",
+)
+def cancel(job_id: str | None, latest: bool, testflinger_bin: str) -> None:
+    """Cancel a Testflinger reservation by job id."""
+    if latest and job_id is not None:
+        raise click.ClickException("Pass either JOB_ID or --latest, not both.")
+    if not latest and job_id is None:
+        raise click.ClickException("Missing JOB_ID. Pass a job id or use --latest.")
+
+    resolved_job_id = load_latest_reservation_job_id() if latest else job_id
+    assert resolved_job_id is not None
+
+    result = cancel_reservation(
+        job_id=resolved_job_id,
+        runner=subprocess.run,
+        testflinger_bin=testflinger_bin,
+    )
+    clear_latest_reservation(resolved_job_id)
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    if stdout:
+        click.echo(stdout)
+    if stderr:
+        click.echo(stderr, err=True)

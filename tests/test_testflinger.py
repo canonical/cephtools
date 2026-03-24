@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from click import ClickException
+from click.testing import CliRunner
 
 import cephtools.config as config_module
 from cephtools.config import DEFAULT_TERRAFORM_ROOT, load_cephtools_config
@@ -14,16 +15,22 @@ from cephtools.testflinger import (
     BackendConfig,
     ReservationDetails,
     build_job_file,
-    ensure_backend_config,
-    parse_submit_output,
-    _parse_reservation_window,
-    _ssh_key_reference_warning,
     build_deploy_script,
+    cancel_reservation,
+    clear_latest_reservation,
+    cli,
+    ensure_backend_config,
+    latest_reservation_state_path,
+    load_latest_reservation_job_id,
+    machine_ids,
+    parse_submit_output,
     perform_remote_deploy,
-    read_testenv_network_config,
     read_testenv_cloud_config,
     read_testenv_credentials,
-    machine_ids,
+    read_testenv_network_config,
+    save_latest_reservation,
+    _parse_reservation_window,
+    _ssh_key_reference_warning,
 )
 
 
@@ -98,6 +105,227 @@ def test_parse_submit_output_success(stdout: str, expected: str) -> None:
 def test_parse_submit_output_failure(stdout: str) -> None:
     with pytest.raises(ClickException):
         parse_submit_output(stdout)
+
+
+def test_cancel_reservation_invokes_testflinger() -> None:
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def fake_runner(cmd: list[str], **kwargs: Any):
+        calls.append((cmd, kwargs))
+
+        class Result:
+            returncode = 0
+            stdout = "Cancelled job-1\n"
+            stderr = ""
+
+        return Result()
+
+    result = cancel_reservation("job-1", runner=fake_runner, testflinger_bin="tf")
+
+    assert result.stdout == "Cancelled job-1\n"
+    assert calls == [
+        (
+            ["tf", "cancel", "job-1"],
+            {"capture_output": True, "text": True, "check": False},
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected_message"),
+    [
+        ("", "boom", "boom"),
+        ("failed", "", "failed"),
+        ("", "", "testflinger cancel failed"),
+    ],
+)
+def test_cancel_reservation_failure(
+    stdout: str,
+    stderr: str,
+    expected_message: str,
+) -> None:
+    def failing_runner(cmd: list[str], **kwargs: Any):
+        return type(
+            "Result",
+            (),
+            {"returncode": 1, "stdout": stdout, "stderr": stderr},
+        )()
+
+    with pytest.raises(ClickException, match=expected_message):
+        cancel_reservation("job-1", runner=failing_runner, testflinger_bin="tf")
+
+
+def test_cancel_cli_invokes_helper(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path
+) -> None:
+    runner = CliRunner()
+    captured: dict[str, object] = {}
+    details = ReservationDetails(
+        job_id="job-9",
+        queue_name="ceph-qa-1",
+        user="ubuntu",
+        ip="10.0.0.9",
+        expires_at=dt.datetime.now(),
+        timeout_seconds=600,
+    )
+    save_latest_reservation(details)
+
+    def fake_cancel_reservation(job_id: str, runner, testflinger_bin: str):
+        captured["job_id"] = job_id
+        captured["runner"] = runner
+        captured["testflinger_bin"] = testflinger_bin
+
+        class Result:
+            stdout = "Cancelled job-9\n"
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(
+        "cephtools.testflinger.cancel_reservation", fake_cancel_reservation
+    )
+
+    result = runner.invoke(cli, ["cancel", "job-9", "--testflinger-bin", "tf"])
+
+    assert result.exit_code == 0
+    assert result.output == "Cancelled job-9\n"
+    assert captured["job_id"] == "job-9"
+    assert captured["testflinger_bin"] == "tf"
+    assert not latest_reservation_state_path().exists()
+
+
+def test_save_and_load_latest_reservation(state_home: Path) -> None:
+    details = ReservationDetails(
+        job_id="job-12",
+        queue_name="ceph-qa-2",
+        user="ubuntu",
+        ip="10.0.0.12",
+        expires_at=dt.datetime(2024, 10, 16, 16, 0, 0),
+        timeout_seconds=1800,
+    )
+
+    save_latest_reservation(details)
+
+    assert latest_reservation_state_path().exists()
+    assert load_latest_reservation_job_id() == "job-12"
+
+
+def test_clear_latest_reservation_only_clears_matching_job(state_home: Path) -> None:
+    details = ReservationDetails(
+        job_id="job-22",
+        queue_name="ceph-qa-2",
+        user="ubuntu",
+        ip="10.0.0.22",
+        expires_at=dt.datetime(2024, 10, 16, 16, 0, 0),
+        timeout_seconds=1800,
+    )
+    save_latest_reservation(details)
+
+    clear_latest_reservation("other-job")
+    assert latest_reservation_state_path().exists()
+
+    clear_latest_reservation("job-22")
+    assert not latest_reservation_state_path().exists()
+
+
+def test_cancel_cli_latest_uses_saved_job(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path
+) -> None:
+    runner = CliRunner()
+    captured: dict[str, object] = {}
+    save_latest_reservation(
+        ReservationDetails(
+            job_id="job-latest",
+            queue_name="ceph-qa-1",
+            user="ubuntu",
+            ip="10.0.0.10",
+            expires_at=dt.datetime.now(),
+            timeout_seconds=600,
+        )
+    )
+
+    def fake_cancel_reservation(job_id: str, runner, testflinger_bin: str):
+        captured["job_id"] = job_id
+        captured["testflinger_bin"] = testflinger_bin
+
+        class Result:
+            stdout = "Cancelled job-latest\n"
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(
+        "cephtools.testflinger.cancel_reservation", fake_cancel_reservation
+    )
+
+    result = runner.invoke(cli, ["cancel", "--latest", "--testflinger-bin", "tf"])
+
+    assert result.exit_code == 0
+    assert result.output == "Cancelled job-latest\n"
+    assert captured["job_id"] == "job-latest"
+    assert captured["testflinger_bin"] == "tf"
+    assert not latest_reservation_state_path().exists()
+
+
+def test_cancel_cli_latest_without_saved_job(state_home: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["cancel", "--latest"])
+
+    assert result.exit_code != 0
+    assert "No saved Testflinger reservation found" in result.output
+
+
+def test_cancel_cli_rejects_job_id_with_latest(state_home: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["cancel", "job-1", "--latest"])
+
+    assert result.exit_code != 0
+    assert "Pass either JOB_ID or --latest, not both." in result.output
+
+
+def test_cancel_cli_requires_job_or_latest(state_home: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["cancel"])
+
+    assert result.exit_code != 0
+    assert "Missing JOB_ID. Pass a job id or use --latest." in result.output
+
+
+def test_reserve_cli_saves_latest_reservation(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path
+) -> None:
+    runner = CliRunner()
+    details = ReservationDetails(
+        job_id="job-saved",
+        queue_name="ceph-qa-1",
+        user="ubuntu",
+        ip="10.0.0.30",
+        expires_at=dt.datetime(2024, 10, 16, 16, 0, 0),
+        timeout_seconds=1800,
+    )
+
+    monkeypatch.setattr(
+        "cephtools.testflinger.ensure_backend_config",
+        lambda *args, **kwargs: (BackendConfig("lp:tester"), False),
+    )
+    monkeypatch.setattr(
+        "cephtools.testflinger._ssh_key_reference_warning", lambda value: None
+    )
+    monkeypatch.setattr("cephtools.testflinger.reserve_node", lambda **kwargs: details)
+    monkeypatch.setattr(
+        "cephtools.testflinger.print_reservation_summary", lambda *args, **kwargs: None
+    )
+
+    result = runner.invoke(
+        cli,
+        ["reserve", "ceph-qa-1", "--testflinger-bin", "tf"],
+    )
+
+    assert result.exit_code == 0
+    assert load_latest_reservation_job_id() == "job-saved"
 
 
 def test_parse_reservation_window_success() -> None:
