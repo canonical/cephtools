@@ -317,7 +317,7 @@ def install_maas_deb(version: str) -> None:
     run(["sudo", "apt-get", "-y", "install", "maas"])
 
 
-def _bind9_ipv4_listen_addresses_excluding_interface(interface_name: str) -> list[str]:
+def _bind9_ipv4_listen_addresses() -> list[str]:
     result = run(["ip", "-j", "-4", "addr", "show"])
     try:
         interfaces = json.loads(result.stdout or "[]")
@@ -330,8 +330,6 @@ def _bind9_ipv4_listen_addresses_excluding_interface(interface_name: str) -> lis
     seen = {"127.0.0.1"}
     for interface in interfaces:
         if not isinstance(interface, dict):
-            continue
-        if interface.get("ifname") == interface_name:
             continue
         addr_info = interface.get("addr_info") or []
         if not isinstance(addr_info, list):
@@ -353,13 +351,13 @@ def _bind9_ipv4_listen_addresses_excluding_interface(interface_name: str) -> lis
     return addresses
 
 
-def configure_maas_bind9_ipv4_excluding_bridge(lxdbridge: str) -> None:
-    listen_addresses = _bind9_ipv4_listen_addresses_excluding_interface(lxdbridge)
+def configure_maas_bind9_ipv4() -> None:
+    listen_addresses = _bind9_ipv4_listen_addresses()
     rendered_addresses = " ".join(f"{address};" for address in listen_addresses)
     desired_listen_on = f"    listen-on {{ {rendered_addresses} }};"
     click.echo(
-        "Configuring MAAS bind9 IPv4 listen-on policy on detected addresses "
-        f"excluding {lxdbridge}: {', '.join(listen_addresses)}"
+        "Configuring MAAS bind9 IPv4 listen-on policy on detected addresses: "
+        + ", ".join(listen_addresses)
     )
     run(
         "sudo python3 - <<'PY'\n"
@@ -1333,7 +1331,7 @@ def maas_init_cmd(ctx):
     maas_login(ctx.obj["maas_url"], ctx.obj["admin"], api_key)
     time.sleep(5)
     verify_maas(ctx.obj["admin"])
-    configure_maas_bind9_ipv4_excluding_bridge(ctx.obj["lxdbridge"])
+    configure_maas_bind9_ipv4()
     dns_preflight()
     click.echo("maas initialized, bind9 configured, and logged in.")
     # Write cloud.yaml now; cred.yaml later in juju-init after health checks again.
@@ -1343,11 +1341,11 @@ def maas_init_cmd(ctx):
 
 @cli.command(
     "configure-bind9",
-    help="Configure MAAS bind9 IPv4 to listen on all interfaces except the LXD bridge.",
+    help="Configure MAAS bind9 IPv4 to listen on all detected IPv4 addresses.",
 )
 @click.pass_context
 def configure_bind9(ctx):
-    configure_maas_bind9_ipv4_excluding_bridge(ctx.obj["lxdbridge"])
+    configure_maas_bind9_ipv4()
     click.echo("maas bind9 configured.")
 
 

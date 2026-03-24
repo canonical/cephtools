@@ -383,7 +383,7 @@ def test_lxd_init_impl_restarts_bind9_on_failure(monkeypatch):
     ]
 
 
-def test_bind9_ipv4_listen_addresses_excluding_interface(monkeypatch):
+def test_bind9_ipv4_listen_addresses(monkeypatch):
     def fake_run(cmd, check=True, shell=False, quiet=False):
         assert cmd == ["ip", "-j", "-4", "addr", "show"]
 
@@ -409,41 +409,12 @@ def test_bind9_ipv4_listen_addresses_excluding_interface(monkeypatch):
 
     monkeypatch.setattr(testenv, "run", fake_run)
 
-    addresses = testenv._bind9_ipv4_listen_addresses_excluding_interface("lxdbr0")
+    addresses = testenv._bind9_ipv4_listen_addresses()
 
-    assert addresses == ["127.0.0.1", "10.241.21.59"]
-
-
-def test_bind9_ipv4_listen_addresses_excluding_interface_when_bridge_missing(
-    monkeypatch,
-):
-    def fake_run(cmd, check=True, shell=False, quiet=False):
-        assert cmd == ["ip", "-j", "-4", "addr", "show"]
-
-        class Result:
-            stdout = json.dumps(
-                [
-                    {
-                        "ifname": "lo",
-                        "addr_info": [{"family": "inet", "local": "127.0.0.1"}],
-                    },
-                    {
-                        "ifname": "eno49",
-                        "addr_info": [{"family": "inet", "local": "10.241.21.59"}],
-                    },
-                ]
-            )
-
-        return Result()
-
-    monkeypatch.setattr(testenv, "run", fake_run)
-
-    addresses = testenv._bind9_ipv4_listen_addresses_excluding_interface("lxdbr0")
-
-    assert addresses == ["127.0.0.1", "10.241.21.59"]
+    assert addresses == ["127.0.0.1", "10.241.21.59", "10.241.99.1"]
 
 
-def test_configure_maas_bind9_ipv4_excluding_bridge(monkeypatch):
+def test_configure_maas_bind9_ipv4(monkeypatch):
     commands: list[object] = []
     echoes: list[str] = []
 
@@ -457,22 +428,22 @@ def test_configure_maas_bind9_ipv4_excluding_bridge(monkeypatch):
 
     monkeypatch.setattr(
         testenv,
-        "_bind9_ipv4_listen_addresses_excluding_interface",
-        lambda bridge: ["127.0.0.1", "10.241.21.59"],
+        "_bind9_ipv4_listen_addresses",
+        lambda: ["127.0.0.1", "10.241.21.59", "10.241.99.1"],
     )
     monkeypatch.setattr(testenv, "run", fake_run)
     monkeypatch.setattr(
         testenv.click, "echo", lambda message, **kwargs: echoes.append(message)
     )
 
-    testenv.configure_maas_bind9_ipv4_excluding_bridge("lxdbr0")
+    testenv.configure_maas_bind9_ipv4()
 
     assert echoes == [
-        "Configuring MAAS bind9 IPv4 listen-on policy on detected addresses excluding lxdbr0: 127.0.0.1, 10.241.21.59"
+        "Configuring MAAS bind9 IPv4 listen-on policy on detected addresses: 127.0.0.1, 10.241.21.59, 10.241.99.1"
     ]
     assert len(commands) == 3
     assert isinstance(commands[0], str)
-    assert "listen-on { 127.0.0.1; 10.241.21.59; };" in commands[0]
+    assert "listen-on { 127.0.0.1; 10.241.21.59; 10.241.99.1; };" in commands[0]
     assert commands[1] == ["sudo", "named-checkconf"]
     assert commands[2] == ["sudo", "systemctl", "reload", "bind9"]
 
