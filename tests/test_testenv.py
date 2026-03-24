@@ -331,10 +331,14 @@ def test_lxd_init_impl_stops_and_restarts_bind9(monkeypatch):
 
     monkeypatch.setattr(testenv, "run", fake_run)
     monkeypatch.setattr(
-        testenv, "ensure_lxd_network", lambda name, ipv4_address=None: ensured_networks.append(name)
+        testenv,
+        "ensure_lxd_network",
+        lambda name, ipv4_address=None: ensured_networks.append(name),
     )
     monkeypatch.setattr(testenv.time, "sleep", lambda seconds: sleeps.append(seconds))
-    monkeypatch.setattr(testenv.click, "echo", lambda message, **kwargs: echoes.append(message))
+    monkeypatch.setattr(
+        testenv.click, "echo", lambda message, **kwargs: echoes.append(message)
+    )
 
     testenv.lxd_init_impl("10.0.0.1", "secret", "lxdbr0")
 
@@ -345,7 +349,11 @@ def test_lxd_init_impl_stops_and_restarts_bind9(monkeypatch):
         True,
         True,
     )
-    assert commands[3] == ("lxc config set core.https_address :8443 || true", True, True)
+    assert commands[3] == (
+        "lxc config set core.https_address :8443 || true",
+        True,
+        True,
+    )
     assert commands[4] == ("lxc network set lxdbr0 dns.mode=none || true", True, True)
     assert commands[5] == ("lxc network set lxdbr0 ipv4.dhcp=false || true", True, True)
     assert commands[6] == ("lxc network set lxdbr0 ipv6.dhcp=false || true", True, True)
@@ -402,6 +410,10 @@ def test_bind9_ipv4_listen_addresses(monkeypatch):
                         "ifname": "lxdbr0",
                         "addr_info": [{"family": "inet", "local": "10.241.99.1"}],
                     },
+                    {
+                        "ifname": "ext",
+                        "addr_info": [{"family": "inet", "local": "10.241.88.1"}],
+                    },
                 ]
             )
 
@@ -411,7 +423,7 @@ def test_bind9_ipv4_listen_addresses(monkeypatch):
 
     addresses = testenv._bind9_ipv4_listen_addresses()
 
-    assert addresses == ["127.0.0.1", "10.241.21.59", "10.241.99.1"]
+    assert addresses == ["127.0.0.1", "10.241.21.59"]
 
 
 def test_configure_maas_bind9_ipv4(monkeypatch):
@@ -429,7 +441,7 @@ def test_configure_maas_bind9_ipv4(monkeypatch):
     monkeypatch.setattr(
         testenv,
         "_bind9_ipv4_listen_addresses",
-        lambda: ["127.0.0.1", "10.241.21.59", "10.241.99.1"],
+        lambda: ["127.0.0.1", "10.241.21.59"],
     )
     monkeypatch.setattr(testenv, "run", fake_run)
     monkeypatch.setattr(
@@ -439,11 +451,11 @@ def test_configure_maas_bind9_ipv4(monkeypatch):
     testenv.configure_maas_bind9_ipv4()
 
     assert echoes == [
-        "Configuring MAAS bind9 IPv4 listen-on policy on detected addresses: 127.0.0.1, 10.241.21.59, 10.241.99.1"
+        "Configuring MAAS bind9 IPv4 listen-on policy on detected addresses: 127.0.0.1, 10.241.21.59"
     ]
     assert len(commands) == 3
     assert isinstance(commands[0], str)
-    assert "listen-on { 127.0.0.1; 10.241.21.59; 10.241.99.1; };" in commands[0]
+    assert "listen-on { 127.0.0.1; 10.241.21.59; };" in commands[0]
     assert commands[1] == ["sudo", "named-checkconf"]
     assert commands[2] == ["sudo", "systemctl", "reload", "bind9"]
 

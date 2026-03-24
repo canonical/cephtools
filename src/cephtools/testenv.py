@@ -317,6 +317,14 @@ def install_maas_deb(version: str) -> None:
     run(["sudo", "apt-get", "-y", "install", "maas"])
 
 
+def _bind9_excluded_interface_names() -> set[str]:
+    excluded = {EXT_LXD_NETWORK}
+    lxdbridge = DEFAULTS.get("lxdbridge")
+    if lxdbridge:
+        excluded.add(lxdbridge)
+    return excluded
+
+
 def _bind9_ipv4_listen_addresses() -> list[str]:
     result = run(["ip", "-j", "-4", "addr", "show"])
     try:
@@ -326,10 +334,14 @@ def _bind9_ipv4_listen_addresses() -> list[str]:
             "Failed to parse IPv4 interface addresses as JSON."
         ) from exc
 
+    excluded_interfaces = _bind9_excluded_interface_names()
     addresses: list[str] = ["127.0.0.1"]
     seen = {"127.0.0.1"}
     for interface in interfaces:
         if not isinstance(interface, dict):
+            continue
+        ifname = interface.get("ifname")
+        if isinstance(ifname, str) and ifname in excluded_interfaces:
             continue
         addr_info = interface.get("addr_info") or []
         if not isinstance(addr_info, list):
@@ -682,7 +694,9 @@ def _ensure_maas_auth_ready() -> None:
 def maas_init_impl(maas_url, admin, admin_pw, admin_mail):
     already_initialized = _maas_is_initialized()
     if already_initialized:
-        print("MAAS already configured; ensuring database settings, services, and admin user.")
+        print(
+            "MAAS already configured; ensuring database settings, services, and admin user."
+        )
 
     _ensure_maas_postgres(admin_pw)
     _configure_maas_region(maas_url, admin_pw)
