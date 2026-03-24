@@ -413,7 +413,14 @@ def ensure_lxd_network(name: str, *, ipv4_address: str | None = None) -> None:
 
     address_arg = ipv4_address if ipv4_address else "auto"
     run(
-        f"lxc network create {name} ipv4.address={address_arg} ipv4.nat=true ipv6.address=none"
+        "lxc network create "
+        f"{name} "
+        f"ipv4.address={address_arg} "
+        "ipv4.nat=true "
+        "ipv4.dhcp=false "
+        "ipv6.address=none "
+        "ipv6.dhcp=false "
+        "dns.mode=none"
     )
 
 

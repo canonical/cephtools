@@ -460,6 +460,27 @@ def test_configure_maas_bind9_ipv4(monkeypatch):
     assert commands[2] == ["sudo", "systemctl", "reload", "bind9"]
 
 
+def test_ensure_lxd_network_creates_without_dns_or_dhcp(monkeypatch):
+    commands: list[object] = []
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        commands.append(cmd)
+
+        class Result:
+            stdout = "[]" if cmd == "lxc query /1.0/networks" else ""
+
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    testenv.ensure_lxd_network("ext")
+
+    assert commands == [
+        "lxc query /1.0/networks",
+        "lxc network create ext ipv4.address=auto ipv4.nat=true ipv4.dhcp=false ipv6.address=none ipv6.dhcp=false dns.mode=none",
+    ]
+
+
 def test_verify_maas_checks_systemd_services(monkeypatch):
     commands: list[object] = []
 
