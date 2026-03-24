@@ -78,13 +78,13 @@ Once complete, it provides the SSH command to access the ready-to-use test envir
 
 Use `cephtools testenv` to stand up or manage a local MAAS/LXD/Juju lab for test environment development. 
 
-- `cephtools testenv install`: runs the full workflow: install snaps, initialise LXD, bring up MAAS, register the LXD VM host, configure networking, bootstrap Juju, and ensure the default model exists.
+- `cephtools testenv install`: runs the full workflow: install MAAS from deb packages plus PostgreSQL, initialise LXD, bring up MAAS, register the LXD VM host, configure networking, bootstrap Juju, and ensure the default model exists.
 
 Below are the individual steps:
 
-- `cephtools testenv install-deps`: installs the required snaps (`maas`, `maas-test-db`, `lxd`, `terraform`) and Terragrunt, then checks LXD is ready.
+- `cephtools testenv install-deps`: installs MAAS from the configured deb PPA, PostgreSQL, the required LXD/Terraform snaps, and Terragrunt, then checks LXD is ready.
 - `cephtools testenv lxd-init`:runs the non-interactive LXD initialisation using the configured bridge.
-- `cephtools testenv maas-init`: restarts the resolver and runs DNS preflight checks, initialises MAAS (region + rack), creates/logs in the admin user, re-checks DNS, and writes `cloud.yaml`.
+- `cephtools testenv maas-init`: restarts the resolver and runs DNS preflight checks, configures PostgreSQL-backed MAAS, creates/logs in the admin user, re-checks DNS, and writes `cloud.yaml`.
 - `cephtools testenv register-vm-host` registers the local LXD as a VM host in MAAS and kicks off boot-resource imports.
 - `cephtools testenv configure-network` : configures the default VLAN in MAAS (gateway, DHCP range, space) and records the details `state/network.yaml`.
 - `cephtools testenv ensure-nodes`: reconciles the VM inventory via Terragrunt; override the number of VMs and attached data disks with `--vm-count`, `--vm-data-disk-count`, and `--vm-data-disk-size`.

@@ -124,7 +124,7 @@ def load_cephtools_config(
 
 
 def load_testenv_defaults(path: Path | None = None) -> dict[str, str]:
-    """Return testenv defaults from the configuration, with legacy support."""
+    """Return testenv defaults from the configuration."""
     config_section = load_cephtools_config(path, ensure=True)
     testenv_section = config_section.get("testenv")
     if testenv_section is None:
@@ -135,11 +135,15 @@ def load_testenv_defaults(path: Path | None = None) -> dict[str, str]:
         )
 
     defaults = _TESTENV_DEFAULTS_FALLBACK.copy()
-    legacy_maas_channel: str | None = None
 
     for key, value in testenv_section.items():
         if value is None:
             continue
+        if key == "maas_ch":
+            raise click.ClickException(
+                "Configuration value 'testenv.maas_ch' is no longer supported; "
+                "use 'testenv.maas_version' instead."
+            )
         if key == "maas_version" and not isinstance(value, str):
             raise click.ClickException(
                 "Configuration value 'testenv.maas_version' must be a quoted "
@@ -149,12 +153,6 @@ def load_testenv_defaults(path: Path | None = None) -> dict[str, str]:
             raise click.ClickException(
                 f"Configuration value 'testenv.{key}' must be a string."
             )
-        if key == "maas_ch":
-            legacy_maas_channel = value
-            continue
         defaults[key] = value
-
-    if "maas_version" not in testenv_section and legacy_maas_channel:
-        defaults["maas_version"] = legacy_maas_channel.split("/", 1)[0]
 
     return defaults

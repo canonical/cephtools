@@ -593,8 +593,19 @@ def _postgres_database_exists(name: str) -> bool:
     return result.stdout.strip() == "1"
 
 
+def _disable_systemd_timesyncd() -> None:
+    unit = run(
+        ["systemctl", "list-unit-files", "systemd-timesyncd.service", "--no-legend"],
+        check=False,
+        quiet=True,
+    )
+    if "systemd-timesyncd.service" not in (unit.stdout or ""):
+        return
+    run(["sudo", "systemctl", "disable", "--now", "systemd-timesyncd"])
+
+
 def _ensure_maas_postgres(password: str) -> None:
-    run(["sudo", "systemctl", "disable", "--now", "systemd-timesyncd"], check=False)
+    _disable_systemd_timesyncd()
 
     role = _sql_identifier(MAAS_DB_USER)
     password_sql = _sql_literal(password)
@@ -655,6 +666,10 @@ def _maas_admin_exists(admin: str) -> bool:
     return result.returncode == 0 and bool((result.stdout or "").strip())
 
 
+def _ensure_maas_auth_ready() -> None:
+    run(["sudo", "maas-region", "configauth", "--json"], quiet=True)
+
+
 def maas_init_impl(maas_url, admin, admin_pw, admin_mail):
     already_initialized = _maas_is_initialized()
     if already_initialized:
@@ -662,11 +677,7 @@ def maas_init_impl(maas_url, admin, admin_pw, admin_mail):
 
     _ensure_maas_postgres(admin_pw)
     _configure_maas_region(maas_url, admin_pw)
-
-    try:
-        run(["sudo", "maas", "init", "--skip-admin"])
-    except subprocess.CalledProcessError as e:
-        print((e.stderr or "").strip())
+    _ensure_maas_auth_ready()
 
     if not _maas_admin_exists(admin):
         try:
@@ -699,34 +710,20 @@ def maas_login(maas_url, admin, api_key):
 
 
 def verify_maas(admin):
-    import re
-
-    status = run("sudo maas status", check=False, quiet=True)
-    if status.returncode == 0:
-        output = (status.stdout or "").lower()
-        regiond_ok = re.search(
-            r"regiond(?::regiond-\d+)?\s+(enabled\s+active|running)\b", output
+    regiond = run(
+        ["sudo", "systemctl", "is-active", "--quiet", "maas-regiond"],
+        check=False,
+        quiet=True,
+    )
+    rackd = run(
+        ["sudo", "systemctl", "is-active", "--quiet", "maas-rackd"],
+        check=False,
+        quiet=True,
+    )
+    if regiond.returncode != 0 or rackd.returncode != 0:
+        raise RuntimeError(
+            "MAAS services not running (maas-regiond/maas-rackd must be active)"
         )
-        rackd_ok = re.search(r"rackd\s+(enabled\s+active|running)\b", output)
-        if not regiond_ok or not rackd_ok:
-            raise RuntimeError(
-                "MAAS services not running (regiond/rackd must be active)"
-            )
-    else:
-        regiond = run(
-            ["sudo", "systemctl", "is-active", "--quiet", "maas-regiond"],
-            check=False,
-            quiet=True,
-        )
-        rackd = run(
-            ["sudo", "systemctl", "is-active", "--quiet", "maas-rackd"],
-            check=False,
-            quiet=True,
-        )
-        if regiond.returncode != 0 or rackd.returncode != 0:
-            raise RuntimeError(
-                "MAAS services not running (maas-regiond/maas-rackd must be active)"
-            )
     _ = run(f"maas {admin} boot-resources read").stdout
 
 

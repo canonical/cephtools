@@ -225,6 +225,11 @@ def test_maas_init_impl_configures_postgres_backed_maas(monkeypatch):
         "_configure_maas_region",
         lambda maas_url, db_password: calls.append(("region", maas_url, db_password)),
     )
+    monkeypatch.setattr(
+        testenv,
+        "_ensure_maas_auth_ready",
+        lambda: calls.append(("auth-ready",)),
+    )
     monkeypatch.setattr(testenv, "_maas_admin_exists", lambda admin: False)
     monkeypatch.setattr(testenv.time, "sleep", lambda seconds: None)
 
@@ -248,7 +253,7 @@ def test_maas_init_impl_configures_postgres_backed_maas(monkeypatch):
     assert calls == [
         ("postgres", "secret"),
         ("region", "http://10.0.0.1:5240/MAAS", "secret"),
-        ["sudo", "maas", "init", "--skip-admin"],
+        ("auth-ready",),
         [
             "sudo",
             "maas",
@@ -425,33 +430,7 @@ def test_configure_maas_bind9_ipv4_excluding_bridge(monkeypatch):
     assert commands[2] == ["sudo", "systemctl", "reload", "bind9"]
 
 
-def test_verify_maas_accepts_running_status(monkeypatch):
-    commands: list[str] = []
-
-    def fake_run(cmd, check=True, shell=False, quiet=False):
-        commands.append(cmd)
-
-        class Result:
-            stdout = ""
-            returncode = 0
-
-        if cmd == "sudo maas status":
-            Result.stdout = (
-                "rackd                            RUNNING   pid 8000\n"
-                "regiond:regiond-0                RUNNING   pid 8003\n"
-            )
-        elif cmd == "maas admin boot-resources read":
-            Result.stdout = "[]"
-        return Result()
-
-    monkeypatch.setattr(testenv, "run", fake_run)
-
-    testenv.verify_maas("admin")
-
-    assert commands == ["sudo maas status", "maas admin boot-resources read"]
-
-
-def test_verify_maas_falls_back_to_systemctl(monkeypatch):
+def test_verify_maas_checks_systemd_services(monkeypatch):
     commands: list[object] = []
 
     def fake_run(cmd, check=True, shell=False, quiet=False):
@@ -461,9 +440,7 @@ def test_verify_maas_falls_back_to_systemctl(monkeypatch):
             stdout = ""
             returncode = 0
 
-        if cmd == "sudo maas status":
-            Result.returncode = 2
-        elif cmd == ["sudo", "systemctl", "is-active", "--quiet", "maas-regiond"]:
+        if cmd == ["sudo", "systemctl", "is-active", "--quiet", "maas-regiond"]:
             Result.returncode = 0
         elif cmd == ["sudo", "systemctl", "is-active", "--quiet", "maas-rackd"]:
             Result.returncode = 0
@@ -476,11 +453,28 @@ def test_verify_maas_falls_back_to_systemctl(monkeypatch):
     testenv.verify_maas("admin")
 
     assert commands == [
-        "sudo maas status",
         ["sudo", "systemctl", "is-active", "--quiet", "maas-regiond"],
         ["sudo", "systemctl", "is-active", "--quiet", "maas-rackd"],
         "maas admin boot-resources read",
     ]
+
+
+def test_verify_maas_raises_when_service_inactive(monkeypatch):
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        class Result:
+            stdout = ""
+            returncode = 0
+
+        if cmd == ["sudo", "systemctl", "is-active", "--quiet", "maas-regiond"]:
+            Result.returncode = 0
+        elif cmd == ["sudo", "systemctl", "is-active", "--quiet", "maas-rackd"]:
+            Result.returncode = 3
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    with pytest.raises(RuntimeError):
+        testenv.verify_maas("admin")
 
 
 def test_extract_arches():

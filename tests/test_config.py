@@ -77,7 +77,7 @@ def test_load_testenv_defaults_overrides_from_config(state_home: Path) -> None:
     }
 
 
-def test_load_testenv_defaults_maps_legacy_maas_ch(state_home: Path) -> None:
+def test_load_testenv_defaults_rejects_legacy_maas_ch(state_home: Path) -> None:
     cfg_path = state_home / config.CONFIG_FILENAME
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(
@@ -91,10 +91,10 @@ def test_load_testenv_defaults_maps_legacy_maas_ch(state_home: Path) -> None:
         )
     )
 
-    defaults = config.load_testenv_defaults()
+    with pytest.raises(config.click.ClickException) as excinfo:
+        config.load_testenv_defaults()
 
-    assert defaults["maas_version"] == "3.6"
-    assert "maas_ch" not in defaults
+    assert "no longer supported" in str(excinfo.value)
 
 
 def test_load_testenv_defaults_requires_quoted_maas_version(
