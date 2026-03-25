@@ -319,6 +319,7 @@ def test_lxd_init_impl_stops_and_restarts_bind9(monkeypatch):
     commands: list[object] = []
     echoes: list[str] = []
     ensured_networks: list[str] = []
+    ensured_profile_networks: list[str] = []
     sleeps: list[float] = []
 
     def fake_run(cmd, check=True, shell=False, quiet=False):
@@ -335,6 +336,11 @@ def test_lxd_init_impl_stops_and_restarts_bind9(monkeypatch):
         "ensure_lxd_network",
         lambda name, ipv4_address=None: ensured_networks.append(name),
     )
+    monkeypatch.setattr(
+        testenv,
+        "ensure_lxd_default_profile_network",
+        lambda name: ensured_profile_networks.append(name),
+    )
     monkeypatch.setattr(testenv.time, "sleep", lambda seconds: sleeps.append(seconds))
     monkeypatch.setattr(
         testenv.click, "echo", lambda message, **kwargs: echoes.append(message)
@@ -344,21 +350,20 @@ def test_lxd_init_impl_stops_and_restarts_bind9(monkeypatch):
 
     assert commands[0] == (["sudo", "systemctl", "stop", "bind9"], False, False)
     assert commands[1] == ("sudo snap set lxd daemon.user.group=adm", True, False)
-    assert commands[2] == (
-        "sudo lxd init --auto --trust-password=secret --network-address=10.0.0.1 --network-port=8443 || true",
-        True,
-        True,
-    )
+    assert commands[2] == (["sudo", "lxd", "init", "--minimal"], True, False)
     assert commands[3] == (
-        "lxc config set core.https_address :8443 || true",
+        ["lxc", "config", "set", "core.https_address", ":8443"],
         True,
-        True,
+        False,
     )
-    assert commands[4] == ("lxc network set lxdbr0 dns.mode=none || true", True, True)
-    assert commands[5] == ("lxc network set lxdbr0 ipv4.dhcp=false || true", True, True)
-    assert commands[6] == ("lxc network set lxdbr0 ipv6.dhcp=false || true", True, True)
-    assert commands[7] == (["sudo", "systemctl", "start", "bind9"], False, False)
-    assert ensured_networks == [testenv.EXT_LXD_NETWORK]
+    assert commands[4] == (
+        ["lxc", "config", "set", "core.trust_password", "secret"],
+        True,
+        False,
+    )
+    assert commands[5] == (["sudo", "systemctl", "start", "bind9"], False, False)
+    assert ensured_networks == ["lxdbr0", testenv.EXT_LXD_NETWORK]
+    assert ensured_profile_networks == ["lxdbr0"]
     assert sleeps == [2]
     assert echoes == [
         "Stopping bind9 temporarily so LXD bridge setup can claim port 53...",
@@ -423,7 +428,7 @@ def test_bind9_ipv4_listen_addresses(monkeypatch):
 
     addresses = testenv._bind9_ipv4_listen_addresses()
 
-    assert addresses == ["127.0.0.1", "10.241.21.59"]
+    assert addresses == ["127.0.0.1", "10.241.21.59", "10.241.99.1"]
 
 
 def test_configure_maas_bind9_ipv4(monkeypatch):
@@ -441,7 +446,7 @@ def test_configure_maas_bind9_ipv4(monkeypatch):
     monkeypatch.setattr(
         testenv,
         "_bind9_ipv4_listen_addresses",
-        lambda: ["127.0.0.1", "10.241.21.59"],
+        lambda: ["127.0.0.1", "10.241.21.59", "10.241.99.1"],
     )
     monkeypatch.setattr(testenv, "run", fake_run)
     monkeypatch.setattr(
@@ -451,11 +456,11 @@ def test_configure_maas_bind9_ipv4(monkeypatch):
     testenv.configure_maas_bind9_ipv4()
 
     assert echoes == [
-        "Configuring MAAS bind9 IPv4 listen-on policy on detected addresses: 127.0.0.1, 10.241.21.59"
+        "Configuring MAAS bind9 IPv4 listen-on policy on detected addresses: 127.0.0.1, 10.241.21.59, 10.241.99.1"
     ]
     assert len(commands) == 3
     assert isinstance(commands[0], str)
-    assert "listen-on { 127.0.0.1; 10.241.21.59; };" in commands[0]
+    assert "listen-on { 127.0.0.1; 10.241.21.59; 10.241.99.1; };" in commands[0]
     assert commands[1] == ["sudo", "named-checkconf"]
     assert commands[2] == ["sudo", "systemctl", "reload", "bind9"]
 
@@ -478,6 +483,99 @@ def test_ensure_lxd_network_creates_without_dns_or_dhcp(monkeypatch):
     assert commands == [
         "lxc query /1.0/networks",
         "lxc network create ext ipv4.address=auto ipv4.nat=true ipv4.dhcp=false ipv6.address=none ipv6.dhcp=false dns.mode=none",
+        ["lxc", "network", "set", "ext", "dns.mode=none"],
+        ["lxc", "network", "set", "ext", "ipv4.dhcp=false"],
+        ["lxc", "network", "set", "ext", "ipv6.dhcp=false"],
+    ]
+
+
+def test_ensure_lxd_network_updates_existing_network(monkeypatch):
+    commands: list[object] = []
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        commands.append(cmd)
+
+        class Result:
+            stdout = json.dumps(["/1.0/networks/lxdbr0"])
+
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    testenv.ensure_lxd_network("lxdbr0")
+
+    assert commands == [
+        "lxc query /1.0/networks",
+        ["lxc", "network", "set", "lxdbr0", "dns.mode=none"],
+        ["lxc", "network", "set", "lxdbr0", "ipv4.dhcp=false"],
+        ["lxc", "network", "set", "lxdbr0", "ipv6.dhcp=false"],
+    ]
+
+
+def test_ensure_lxd_default_profile_network_adds_eth0(monkeypatch):
+    commands: list[object] = []
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        commands.append(cmd)
+
+        class Result:
+            stdout = json.dumps({"devices": {"root": {"type": "disk"}}})
+
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    testenv.ensure_lxd_default_profile_network("lxdbr0")
+
+    assert commands == [
+        "lxc query /1.0/profiles/default",
+        [
+            "lxc",
+            "profile",
+            "device",
+            "add",
+            "default",
+            "eth0",
+            "nic",
+            "network=lxdbr0",
+            "name=eth0",
+        ],
+    ]
+
+
+def test_ensure_lxd_default_profile_network_updates_existing_eth0(monkeypatch):
+    commands: list[object] = []
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        commands.append(cmd)
+
+        class Result:
+            stdout = json.dumps(
+                {
+                    "devices": {
+                        "eth0": {"type": "nic", "network": "oldnet", "name": "eth0"}
+                    }
+                }
+            )
+
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    testenv.ensure_lxd_default_profile_network("lxdbr0")
+
+    assert commands == [
+        "lxc query /1.0/profiles/default",
+        [
+            "lxc",
+            "profile",
+            "device",
+            "set",
+            "default",
+            "eth0",
+            "network=lxdbr0",
+            "name=eth0",
+        ],
     ]
 
 

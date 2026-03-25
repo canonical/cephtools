@@ -318,11 +318,11 @@ def install_maas_deb(version: str) -> None:
 
 
 def _bind9_excluded_interface_names() -> set[str]:
-    excluded = {EXT_LXD_NETWORK}
-    lxdbridge = DEFAULTS.get("lxdbridge")
-    if lxdbridge:
-        excluded.add(lxdbridge)
-    return excluded
+    # Keep bind9 on the primary LXD bridge because MAAS-managed guests on that
+    # subnet need MAAS internal DNS (for example *.maas-internal). LXD DNS/DHCP
+    # is explicitly disabled on lxdbr0 during setup, so only the auxiliary ext
+    # network should be excluded from bind9 listen-on addresses.
+    return {EXT_LXD_NETWORK}
 
 
 def _bind9_ipv4_listen_addresses() -> list[str]:
@@ -406,21 +406,72 @@ def configure_maas_bind9_ipv4() -> None:
     run(["sudo", "systemctl", "reload", "bind9"])
 
 
+def _set_lxd_network_no_dns_or_dhcp(name: str) -> None:
+    for key, value in (
+        ("dns.mode", "none"),
+        ("ipv4.dhcp", "false"),
+        ("ipv6.dhcp", "false"),
+    ):
+        run(["lxc", "network", "set", name, f"{key}={value}"])
+
+
 def ensure_lxd_network(name: str, *, ipv4_address: str | None = None) -> None:
     nets = json.loads(run("lxc query /1.0/networks").stdout)
-    if f"/1.0/networks/{name}" in nets:
+    if f"/1.0/networks/{name}" not in nets:
+        address_arg = ipv4_address if ipv4_address else "auto"
+        run(
+            "lxc network create "
+            f"{name} "
+            f"ipv4.address={address_arg} "
+            "ipv4.nat=true "
+            "ipv4.dhcp=false "
+            "ipv6.address=none "
+            "ipv6.dhcp=false "
+            "dns.mode=none"
+        )
+
+    _set_lxd_network_no_dns_or_dhcp(name)
+
+
+def ensure_lxd_default_profile_network(name: str) -> None:
+    profile = json.loads(run("lxc query /1.0/profiles/default").stdout)
+    devices = profile.get("devices")
+    if not isinstance(devices, dict):
+        raise click.ClickException("LXD default profile has unexpected devices data.")
+
+    eth0 = devices.get("eth0")
+    if isinstance(eth0, dict) and eth0.get("type") == "nic":
+        if eth0.get("network") == name and eth0.get("name") == "eth0":
+            return
+        run(
+            [
+                "lxc",
+                "profile",
+                "device",
+                "set",
+                "default",
+                "eth0",
+                f"network={name}",
+                "name=eth0",
+            ]
+        )
         return
 
-    address_arg = ipv4_address if ipv4_address else "auto"
+    if "eth0" in devices:
+        run(["lxc", "profile", "device", "remove", "default", "eth0"])
+
     run(
-        "lxc network create "
-        f"{name} "
-        f"ipv4.address={address_arg} "
-        "ipv4.nat=true "
-        "ipv4.dhcp=false "
-        "ipv6.address=none "
-        "ipv6.dhcp=false "
-        "dns.mode=none"
+        [
+            "lxc",
+            "profile",
+            "device",
+            "add",
+            "default",
+            "eth0",
+            "nic",
+            f"network={name}",
+            "name=eth0",
+        ]
     )
 
 
@@ -438,18 +489,14 @@ def lxd_init_impl(ip, admin_pw, lxdbridge):
     _stop_bind9_for_lxd_setup()
     try:
         run("sudo snap set lxd daemon.user.group=adm")
-        run(
-            f"sudo lxd init --auto --trust-password={shlex.quote(admin_pw)} "
-            f"--network-address={ip} --network-port=8443 || true",
-            shell=True,
-        )
-        run("lxc config set core.https_address :8443 || true", shell=True)
-        for k, v in [
-            ("dns.mode", "none"),
-            ("ipv4.dhcp", "false"),
-            ("ipv6.dhcp", "false"),
-        ]:
-            run(f"lxc network set {lxdbridge} {k}={v} || true", shell=True)
+        # Use minimal init so LXD does not auto-create lxdbr0 with dnsmasq
+        # enabled before we can disable DNS/DHCP. We create and configure the
+        # managed bridges explicitly afterwards.
+        run(["sudo", "lxd", "init", "--minimal"])
+        run(["lxc", "config", "set", "core.https_address", ":8443"])
+        run(["lxc", "config", "set", "core.trust_password", admin_pw])
+        ensure_lxd_network(lxdbridge)
+        ensure_lxd_default_profile_network(lxdbridge)
         ensure_lxd_network(EXT_LXD_NETWORK)
         time.sleep(2)
     finally:
