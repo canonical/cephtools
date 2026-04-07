@@ -318,11 +318,10 @@ def install_maas_deb(version: str) -> None:
 
 
 def _bind9_excluded_interface_names() -> set[str]:
-    # Keep bind9 on the primary LXD bridge because MAAS-managed guests on that
-    # subnet need MAAS internal DNS (for example *.maas-internal). LXD DNS/DHCP
-    # is explicitly disabled on lxdbr0 during setup, so only the auxiliary ext
-    # network should be excluded from bind9 listen-on addresses.
-    return {EXT_LXD_NETWORK}
+    # MAAS-managed guests on both LXD bridges need MAAS internal DNS (for
+    # example *.maas-internal) during deployment, so bind9 must listen on both
+    # bridge addresses.
+    return set()
 
 
 def _bind9_ipv4_listen_addresses() -> list[str]:

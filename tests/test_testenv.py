@@ -428,7 +428,7 @@ def test_bind9_ipv4_listen_addresses(monkeypatch):
 
     addresses = testenv._bind9_ipv4_listen_addresses()
 
-    assert addresses == ["127.0.0.1", "10.241.21.59", "10.241.99.1"]
+    assert addresses == ["127.0.0.1", "10.241.21.59", "10.241.99.1", "10.241.88.1"]
 
 
 def test_configure_maas_bind9_ipv4(monkeypatch):
@@ -446,7 +446,7 @@ def test_configure_maas_bind9_ipv4(monkeypatch):
     monkeypatch.setattr(
         testenv,
         "_bind9_ipv4_listen_addresses",
-        lambda: ["127.0.0.1", "10.241.21.59", "10.241.99.1"],
+        lambda: ["127.0.0.1", "10.241.21.59", "10.241.99.1", "10.241.88.1"],
     )
     monkeypatch.setattr(testenv, "run", fake_run)
     monkeypatch.setattr(
@@ -456,11 +456,11 @@ def test_configure_maas_bind9_ipv4(monkeypatch):
     testenv.configure_maas_bind9_ipv4()
 
     assert echoes == [
-        "Configuring MAAS bind9 IPv4 listen-on policy on detected addresses: 127.0.0.1, 10.241.21.59, 10.241.99.1"
+        "Configuring MAAS bind9 IPv4 listen-on policy on detected addresses: 127.0.0.1, 10.241.21.59, 10.241.99.1, 10.241.88.1"
     ]
     assert len(commands) == 3
     assert isinstance(commands[0], str)
-    assert "listen-on { 127.0.0.1; 10.241.21.59; 10.241.99.1; };" in commands[0]
+    assert "listen-on { 127.0.0.1; 10.241.21.59; 10.241.99.1; 10.241.88.1; };" in commands[0]
     assert commands[1] == ["sudo", "named-checkconf"]
     assert commands[2] == ["sudo", "systemctl", "reload", "bind9"]
 
