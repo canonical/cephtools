@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -321,6 +322,8 @@ def test_lxd_init_impl_stops_and_restarts_bind9(monkeypatch):
     ensured_networks: list[str] = []
     ensured_profile_networks: list[str] = []
     sleeps: list[float] = []
+    waited: list[bool] = []
+    init_calls: list[bool] = []
 
     def fake_run(cmd, check=True, shell=False, quiet=False):
         commands.append((cmd, check, shell))
@@ -331,6 +334,12 @@ def test_lxd_init_impl_stops_and_restarts_bind9(monkeypatch):
         return Result()
 
     monkeypatch.setattr(testenv, "run", fake_run)
+    monkeypatch.setattr(
+        testenv, "_wait_for_bind9_shutdown", lambda: waited.append(True)
+    )
+    monkeypatch.setattr(
+        testenv, "_run_lxd_minimal_init", lambda: init_calls.append(True)
+    )
     monkeypatch.setattr(
         testenv,
         "ensure_lxd_network",
@@ -350,18 +359,19 @@ def test_lxd_init_impl_stops_and_restarts_bind9(monkeypatch):
 
     assert commands[0] == (["sudo", "systemctl", "stop", "bind9"], False, False)
     assert commands[1] == ("sudo snap set lxd daemon.user.group=adm", True, False)
-    assert commands[2] == (["sudo", "lxd", "init", "--minimal"], True, False)
-    assert commands[3] == (
+    assert commands[2] == (
         ["lxc", "config", "set", "core.https_address", ":8443"],
         True,
         False,
     )
-    assert commands[4] == (
+    assert commands[3] == (
         ["lxc", "config", "set", "core.trust_password", "secret"],
         True,
         False,
     )
-    assert commands[5] == (["sudo", "systemctl", "start", "bind9"], False, False)
+    assert commands[4] == (["sudo", "systemctl", "start", "bind9"], False, False)
+    assert waited == [True]
+    assert init_calls == [True]
     assert ensured_networks == ["lxdbr0", testenv.EXT_LXD_NETWORK]
     assert ensured_profile_networks == ["lxdbr0"]
     assert sleeps == [2]
@@ -385,6 +395,8 @@ def test_lxd_init_impl_restarts_bind9_on_failure(monkeypatch):
         return Result()
 
     monkeypatch.setattr(testenv, "run", fake_run)
+    monkeypatch.setattr(testenv, "_wait_for_bind9_shutdown", lambda: None)
+    monkeypatch.setattr(testenv, "_run_lxd_minimal_init", lambda: None)
 
     with pytest.raises(RuntimeError, match="boom"):
         testenv.lxd_init_impl("10.0.0.1", "secret", "lxdbr0")
@@ -394,6 +406,120 @@ def test_lxd_init_impl_restarts_bind9_on_failure(monkeypatch):
         ("sudo snap set lxd daemon.user.group=adm", True, False),
         (["sudo", "systemctl", "start", "bind9"], False, False),
     ]
+
+
+def test_wait_for_bind9_shutdown_waits_for_named_exit(monkeypatch):
+    sleeps: list[float] = []
+    now = {"value": 0.0}
+    service_states = iter(["active", "inactive", "inactive"])
+    named_processes = iter(["123 named\n", ""])
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        if cmd == ["systemctl", "is-active", "bind9"]:
+            stdout = next(service_states)
+        elif cmd == "pgrep -a -x named || true":
+            stdout = next(named_processes)
+        else:
+            raise AssertionError(cmd)
+
+        class Result:
+            def __init__(self, stdout: str):
+                self.stdout = stdout
+                self.returncode = 0
+
+        return Result(stdout)
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+    monkeypatch.setattr(testenv.time, "monotonic", lambda: now["value"])
+    monkeypatch.setattr(
+        testenv.time,
+        "sleep",
+        lambda seconds: (
+            sleeps.append(seconds),
+            now.__setitem__("value", now["value"] + seconds),
+        ),
+    )
+
+    testenv._wait_for_bind9_shutdown(timeout=5, interval=2)
+
+    assert sleeps == [2, 2]
+
+
+def test_run_lxd_minimal_init_retries_after_failure(monkeypatch):
+    init_attempts: list[int] = []
+    diagnostics: list[bool] = []
+    waited: list[bool] = []
+    sleeps: list[float] = []
+    echoes: list[str] = []
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        if cmd == ["sudo", "lxd", "init", "--minimal"]:
+            init_attempts.append(len(init_attempts) + 1)
+            if len(init_attempts) == 1:
+                raise subprocess.CalledProcessError(1, cmd)
+
+        class Result:
+            stdout = ""
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+    monkeypatch.setattr(testenv, "_lxd_is_minimally_initialized", lambda: False)
+    monkeypatch.setattr(
+        testenv, "_log_lxd_port_53_diagnostics", lambda: diagnostics.append(True)
+    )
+    monkeypatch.setattr(
+        testenv, "_wait_for_bind9_shutdown", lambda: waited.append(True)
+    )
+    monkeypatch.setattr(testenv.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(
+        testenv.click, "echo", lambda message, **kwargs: echoes.append(message)
+    )
+
+    testenv._run_lxd_minimal_init()
+
+    assert init_attempts == [1, 2]
+    assert diagnostics == [True]
+    assert waited == [True]
+    assert sleeps == [testenv.LXD_INIT_RETRY_DELAY_SECONDS]
+    assert any("retrying once" in message for message in echoes)
+
+
+def test_run_lxd_minimal_init_continues_on_partial_init(monkeypatch):
+    init_attempts: list[int] = []
+    diagnostics: list[bool] = []
+    sleeps: list[float] = []
+    echoes: list[str] = []
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        if cmd == ["sudo", "lxd", "init", "--minimal"]:
+            init_attempts.append(1)
+            raise subprocess.CalledProcessError(1, cmd)
+
+        class Result:
+            stdout = ""
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+    monkeypatch.setattr(testenv, "_lxd_is_minimally_initialized", lambda: True)
+    monkeypatch.setattr(
+        testenv, "_log_lxd_port_53_diagnostics", lambda: diagnostics.append(True)
+    )
+    monkeypatch.setattr(testenv, "_wait_for_bind9_shutdown", lambda: None)
+    monkeypatch.setattr(testenv.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(
+        testenv.click, "echo", lambda message, **kwargs: echoes.append(message)
+    )
+
+    testenv._run_lxd_minimal_init()
+
+    assert init_attempts == [1]
+    assert diagnostics == [True]
+    assert sleeps == []
+    assert any("partially initialized" in message for message in echoes)
 
 
 def test_bind9_ipv4_listen_addresses(monkeypatch):
@@ -460,7 +586,10 @@ def test_configure_maas_bind9_ipv4(monkeypatch):
     ]
     assert len(commands) == 3
     assert isinstance(commands[0], str)
-    assert "listen-on { 127.0.0.1; 10.241.21.59; 10.241.99.1; 10.241.88.1; };" in commands[0]
+    assert (
+        "listen-on { 127.0.0.1; 10.241.21.59; 10.241.99.1; 10.241.88.1; };"
+        in commands[0]
+    )
     assert commands[1] == ["sudo", "named-checkconf"]
     assert commands[2] == ["sudo", "systemctl", "reload", "bind9"]
 

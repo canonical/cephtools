@@ -48,6 +48,9 @@ DNS_PRECHECK_HOSTS = (
 )
 DNS_PRECHECK_TIMEOUT_SECONDS = 120
 DNS_PRECHECK_INTERVAL_SECONDS = 5
+BIND9_STOP_TIMEOUT_SECONDS = 30
+BIND9_STOP_INTERVAL_SECONDS = 1
+LXD_INIT_RETRY_DELAY_SECONDS = 2
 
 
 def _format_juju_error(exc: jubilant.CLIError) -> str:
@@ -479,19 +482,108 @@ def _stop_bind9_for_lxd_setup() -> None:
     run(["sudo", "systemctl", "stop", "bind9"], check=False)
 
 
+def _bind9_service_state() -> str:
+    result = run(["systemctl", "is-active", "bind9"], check=False, quiet=True)
+    return result.stdout.strip()
+
+
+def _bind9_named_processes() -> list[str]:
+    result = run("pgrep -a -x named || true", check=False, shell=True, quiet=True)
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _wait_for_bind9_shutdown(
+    timeout: float = BIND9_STOP_TIMEOUT_SECONDS,
+    interval: float = BIND9_STOP_INTERVAL_SECONDS,
+) -> None:
+    deadline = time.monotonic() + timeout
+    active_states = {"active", "activating", "reloading", "deactivating"}
+
+    while True:
+        if _bind9_service_state() not in active_states and not _bind9_named_processes():
+            return
+        if time.monotonic() >= deadline:
+            click.echo(
+                "Timed out waiting for bind9 to stop cleanly; continuing and collecting diagnostics if LXD init fails."
+            )
+            return
+        time.sleep(interval)
+
+
 def _start_bind9_after_lxd_setup() -> None:
     click.echo("Starting bind9 again after LXD bridge setup...")
     run(["sudo", "systemctl", "start", "bind9"], check=False)
 
 
+def _log_lxd_port_53_diagnostics() -> None:
+    click.echo("Collecting LXD/bind9 listener diagnostics...")
+    diagnostics = (
+        ("bind9 service status", "sudo systemctl status bind9 --no-pager 2>&1 || true"),
+        ("named processes", "pgrep -a -x named 2>&1 || true"),
+        (
+            "port 53 listeners",
+            "sudo ss -H -lntup 2>&1 | grep -E '(^tcp|^udp).*:53($|[[:space:]])' || true",
+        ),
+        (
+            "dnsmasq and lxd processes",
+            "ps -ef 2>&1 | grep -E 'dnsmasq|lxd' | grep -v grep || true",
+        ),
+        ("LXD networks", "lxc network list 2>&1 || true"),
+        ("ip addresses", "ip -br addr 2>&1 || true"),
+    )
+    for label, command in diagnostics:
+        click.echo(f"-- {label} --")
+        result = run(command, check=False, shell=True, quiet=True)
+        if output := result.stdout.strip():
+            click.echo(output)
+
+
+def _lxd_is_minimally_initialized() -> bool:
+    default_profile = run(
+        ["lxc", "query", "/1.0/profiles/default"], check=False, quiet=True
+    )
+    storage_pools = run(["lxc", "query", "/1.0/storage-pools"], check=False, quiet=True)
+    if default_profile.returncode != 0 or storage_pools.returncode != 0:
+        return False
+
+    try:
+        return bool(json.loads(storage_pools.stdout))
+    except ValueError:
+        return False
+
+
+def _run_lxd_minimal_init() -> None:
+    attempts = 2
+    for attempt in range(1, attempts + 1):
+        try:
+            run(["sudo", "lxd", "init", "--minimal"])
+            return
+        except subprocess.CalledProcessError:
+            _log_lxd_port_53_diagnostics()
+            if _lxd_is_minimally_initialized():
+                click.echo(
+                    "LXD appears partially initialized despite the init error; continuing with explicit network configuration."
+                )
+                return
+            if attempt < attempts:
+                click.echo(
+                    "LXD minimal init failed; waiting briefly and retrying once in case a stale port 53 listener is still exiting."
+                )
+                _wait_for_bind9_shutdown()
+                time.sleep(LXD_INIT_RETRY_DELAY_SECONDS)
+                continue
+            raise
+
+
 def lxd_init_impl(ip, admin_pw, lxdbridge):
     _stop_bind9_for_lxd_setup()
+    _wait_for_bind9_shutdown()
     try:
         run("sudo snap set lxd daemon.user.group=adm")
         # Use minimal init so LXD does not auto-create lxdbr0 with dnsmasq
         # enabled before we can disable DNS/DHCP. We create and configure the
         # managed bridges explicitly afterwards.
-        run(["sudo", "lxd", "init", "--minimal"])
+        _run_lxd_minimal_init()
         run(["lxc", "config", "set", "core.https_address", ":8443"])
         run(["lxc", "config", "set", "core.trust_password", admin_pw])
         ensure_lxd_network(lxdbridge)
