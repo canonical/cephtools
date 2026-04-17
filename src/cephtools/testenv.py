@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from ipaddress import ip_interface, ip_network
 from pathlib import Path
 
@@ -51,6 +52,19 @@ DNS_PRECHECK_INTERVAL_SECONDS = 5
 BIND9_STOP_TIMEOUT_SECONDS = 30
 BIND9_STOP_INTERVAL_SECONDS = 1
 LXD_INIT_RETRY_DELAY_SECONDS = 2
+WARMUP_VM_NAME = "warmup-vm"
+TESTENV_STATE_FILENAMES = ("cloud.yaml", "cred.yaml", "network.yaml")
+
+
+@dataclass(frozen=True)
+class CleanupPhaseResult:
+    phase: str
+    outcome: str
+    detail: str
+
+    @property
+    def failed(self) -> bool:
+        return self.outcome == "failed"
 
 
 def _format_juju_error(exc: jubilant.CLIError) -> str:
@@ -615,7 +629,7 @@ def verify_lxd(lxdbridge):
 def lxd_warmup():
     """Create a temporary VM to warm up LXD and DNS."""
     click.echo("Warming up LXD with a temporary 24.04 VM...")
-    vm_name = "warmup-vm"
+    vm_name = WARMUP_VM_NAME
     click.echo(f"Cleaning up any existing instance of {vm_name}...")
     run(f"lxc delete {vm_name} --force", check=False)
 
@@ -1398,6 +1412,190 @@ def _destroy_nodes_impl() -> None:
     )
 
 
+def _cleanup_destroy_nodes(*, dry_run: bool = False) -> CleanupPhaseResult:
+    phase = "destroy nodes"
+    if dry_run:
+        return CleanupPhaseResult(
+            phase,
+            "ok",
+            "dry-run: would destroy Terragrunt-managed nodes",
+        )
+
+    try:
+        terragrunt_dir = _resolve_terragrunt_dir()
+    except click.ClickException as exc:
+        return CleanupPhaseResult(phase, "failed", str(exc))
+
+    inputs_path = terragrunt_dir / ENSURE_NODES_INPUT_FILENAME
+    if not inputs_path.exists():
+        return CleanupPhaseResult(
+            phase,
+            "skipped",
+            f"{inputs_path} not found",
+        )
+
+    try:
+        _destroy_nodes_impl()
+    except (click.ClickException, subprocess.CalledProcessError) as exc:
+        return CleanupPhaseResult(phase, "failed", str(exc))
+
+    return CleanupPhaseResult(phase, "ok", f"destroyed nodes using {inputs_path}")
+
+
+def _cleanup_kill_controller(
+    controller_name: str, *, dry_run: bool = False
+) -> CleanupPhaseResult:
+    phase = f"kill controller {controller_name}"
+    if dry_run:
+        return CleanupPhaseResult(
+            phase,
+            "ok",
+            f"dry-run: would kill controller {controller_name}",
+        )
+
+    juju = jubilant.Juju()
+    try:
+        if not _juju_controller_exists(juju, controller_name):
+            return CleanupPhaseResult(
+                phase,
+                "skipped",
+                f"controller {controller_name} not found",
+            )
+    except jubilant.CLIError as exc:
+        return CleanupPhaseResult(phase, "failed", _format_juju_error(exc))
+
+    try:
+        run(
+            [
+                "juju",
+                "kill-controller",
+                controller_name,
+                "--no-prompt",
+                "--timeout",
+                "2m",
+            ]
+        )
+    except subprocess.CalledProcessError as exc:
+        return CleanupPhaseResult(phase, "failed", str(exc))
+
+    return CleanupPhaseResult(phase, "ok", f"killed controller {controller_name}")
+
+
+def _cleanup_delete_vm_host(
+    admin: str, vmhost: str, *, dry_run: bool = False
+) -> CleanupPhaseResult:
+    phase = f"delete vm host {vmhost}"
+    if dry_run:
+        return CleanupPhaseResult(
+            phase,
+            "ok",
+            f"dry-run: would delete MAAS VM host {vmhost}",
+        )
+
+    try:
+        host_id = _get_lxd_vm_host_id(admin, vmhost)
+    except click.ClickException:
+        return CleanupPhaseResult(phase, "skipped", f"VM host {vmhost} not found")
+
+    try:
+        run(f"maas {admin} vm-host delete {host_id}")
+    except subprocess.CalledProcessError as exc:
+        return CleanupPhaseResult(phase, "failed", str(exc))
+
+    return CleanupPhaseResult(phase, "ok", f"deleted MAAS VM host id {host_id}")
+
+
+def _cleanup_delete_known_lxd_instances(*, dry_run: bool = False) -> CleanupPhaseResult:
+    phase = "delete known LXD instances"
+    instance_names = (WARMUP_VM_NAME,)
+    if dry_run:
+        instances = ", ".join(instance_names)
+        return CleanupPhaseResult(
+            phase,
+            "ok",
+            f"dry-run: would delete {instances}",
+        )
+
+    deleted: list[str] = []
+    for instance_name in instance_names:
+        info = run(["lxc", "info", instance_name], check=False, quiet=True)
+        if info.returncode != 0:
+            continue
+        try:
+            run(["lxc", "delete", instance_name, "--force"])
+        except subprocess.CalledProcessError as exc:
+            return CleanupPhaseResult(phase, "failed", str(exc))
+        deleted.append(instance_name)
+
+    if not deleted:
+        return CleanupPhaseResult(
+            phase,
+            "skipped",
+            "No known testenv-owned LXD instances found",
+        )
+
+    return CleanupPhaseResult(phase, "ok", f"deleted {', '.join(deleted)}")
+
+
+def _cleanup_remove_state_files(*, dry_run: bool = False) -> CleanupPhaseResult:
+    phase = "remove state files"
+    if dry_run:
+        filenames = ", ".join(TESTENV_STATE_FILENAMES)
+        return CleanupPhaseResult(
+            phase,
+            "ok",
+            f"dry-run: would remove {filenames}",
+        )
+
+    deleted: list[str] = []
+    for filename in TESTENV_STATE_FILENAMES:
+        path = get_state_file(filename, ensure_parent=False)
+        if not path.exists():
+            continue
+        path.unlink(missing_ok=True)
+        deleted.append(filename)
+
+    if not deleted:
+        return CleanupPhaseResult(phase, "skipped", "No generated state files found")
+
+    return CleanupPhaseResult(phase, "ok", f"removed {', '.join(deleted)}")
+
+
+def _cleanup_remove_terragrunt_inputs(*, dry_run: bool = False) -> CleanupPhaseResult:
+    phase = "remove terragrunt inputs"
+    if dry_run:
+        return CleanupPhaseResult(
+            phase,
+            "ok",
+            f"dry-run: would remove {ENSURE_NODES_INPUT_FILENAME}",
+        )
+
+    try:
+        terragrunt_dir = _resolve_terragrunt_dir()
+    except click.ClickException as exc:
+        return CleanupPhaseResult(phase, "failed", str(exc))
+
+    inputs_path = terragrunt_dir / ENSURE_NODES_INPUT_FILENAME
+    if not inputs_path.exists():
+        return CleanupPhaseResult(phase, "skipped", f"{inputs_path} not found")
+
+    inputs_path.unlink(missing_ok=True)
+    return CleanupPhaseResult(phase, "ok", f"removed {inputs_path}")
+
+
+def _emit_cleanup_summary(results: list[CleanupPhaseResult]) -> None:
+    click.echo("Cleanup summary:")
+    for result in results:
+        detail = f" ({result.detail})" if result.detail else ""
+        click.echo(f"- {result.phase}: {result.outcome}{detail}")
+
+    failures = sum(1 for result in results if result.failed)
+    if failures:
+        click.echo(f"Cleanup completed with {failures} failed phase(s).")
+    else:
+        click.echo("Cleanup completed without failures.")
+
+
 # ---- click CLI ------------------------------------------------------------
 
 
@@ -1631,6 +1829,147 @@ def ensure_nodes(
 def destroy_nodes(ctx):
     _destroy_nodes_impl()
     click.echo("Terragrunt destroy completed; MAAS will reconcile VM removals.")
+
+
+@cli.command(
+    "cleanup",
+    help="Reclaim testenv-managed resources and generated state without uninstalling the host toolchain.",
+)
+@click.option(
+    "--dry-run", is_flag=True, help="Print cleanup actions without executing them."
+)
+@click.option(
+    "--keep-nodes",
+    is_flag=True,
+    help="Do not destroy Terragrunt-managed nodes.",
+)
+@click.option(
+    "--keep-controller",
+    is_flag=True,
+    help="Do not destroy the Juju controller.",
+)
+@click.option(
+    "--keep-vm-host",
+    is_flag=True,
+    help="Do not delete the MAAS VM host registration.",
+)
+@click.option(
+    "--keep-lxd-instances",
+    is_flag=True,
+    help="Do not delete known testenv-owned LXD instances.",
+)
+@click.option(
+    "--keep-state",
+    is_flag=True,
+    help="Do not remove generated state files or Terragrunt inputs.",
+)
+@click.pass_context
+def cleanup(
+    ctx,
+    dry_run: bool,
+    keep_nodes: bool,
+    keep_controller: bool,
+    keep_vm_host: bool,
+    keep_lxd_instances: bool,
+    keep_state: bool,
+) -> None:
+    if dry_run:
+        click.echo("Running cleanup in dry-run mode; no changes will be made.")
+
+    results: list[CleanupPhaseResult] = []
+    if keep_nodes:
+        results.append(
+            CleanupPhaseResult("destroy nodes", "skipped", "preserved by --keep-nodes")
+        )
+    else:
+        results.append(
+            _cleanup_destroy_nodes(dry_run=True)
+            if dry_run
+            else _cleanup_destroy_nodes()
+        )
+
+    if keep_controller:
+        results.append(
+            CleanupPhaseResult(
+                f"kill controller {MAAS_CONTROLLER}",
+                "skipped",
+                "preserved by --keep-controller",
+            )
+        )
+    else:
+        results.append(
+            _cleanup_kill_controller(MAAS_CONTROLLER, dry_run=True)
+            if dry_run
+            else _cleanup_kill_controller(MAAS_CONTROLLER)
+        )
+
+    if keep_vm_host:
+        results.append(
+            CleanupPhaseResult(
+                f"delete vm host {ctx.obj['vmhost']}",
+                "skipped",
+                "preserved by --keep-vm-host",
+            )
+        )
+    else:
+        results.append(
+            _cleanup_delete_vm_host(
+                ctx.obj["admin"],
+                ctx.obj["vmhost"],
+                dry_run=True,
+            )
+            if dry_run
+            else _cleanup_delete_vm_host(
+                ctx.obj["admin"],
+                ctx.obj["vmhost"],
+            )
+        )
+
+    if keep_lxd_instances:
+        results.append(
+            CleanupPhaseResult(
+                "delete known LXD instances",
+                "skipped",
+                "preserved by --keep-lxd-instances",
+            )
+        )
+    else:
+        results.append(
+            _cleanup_delete_known_lxd_instances(dry_run=True)
+            if dry_run
+            else _cleanup_delete_known_lxd_instances()
+        )
+
+    if keep_state:
+        results.extend(
+            [
+                CleanupPhaseResult(
+                    "remove state files",
+                    "skipped",
+                    "preserved by --keep-state",
+                ),
+                CleanupPhaseResult(
+                    "remove terragrunt inputs",
+                    "skipped",
+                    "preserved by --keep-state",
+                ),
+            ]
+        )
+    else:
+        results.append(
+            _cleanup_remove_state_files(dry_run=True)
+            if dry_run
+            else _cleanup_remove_state_files()
+        )
+        results.append(
+            _cleanup_remove_terragrunt_inputs(dry_run=True)
+            if dry_run
+            else _cleanup_remove_terragrunt_inputs()
+        )
+
+    _emit_cleanup_summary(results)
+    if any(result.failed for result in results):
+        ctx.exit(1)
 
 
 @cli.command(

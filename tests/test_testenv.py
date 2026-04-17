@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from click import ClickException
+from click.testing import CliRunner
 
 import jubilant
 
@@ -1327,3 +1328,321 @@ def test_juju_onboard_handles_cloud_exists_error(
     assert juju.add_credential_calls == 0
     assert juju.bootstrap_calls == []
     assert juju.switch_calls == ["maas-controller"]
+
+
+def test_cleanup_destroy_nodes_skips_missing_inputs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    terragrunt_dir = tmp_path / "maas-nodes"
+    terragrunt_dir.mkdir(parents=True)
+    monkeypatch.setenv("CEPHTOOLS_TERRAGRUNT_DIR", str(terragrunt_dir))
+    monkeypatch.setattr(
+        testenv,
+        "run",
+        lambda *args, **kwargs: pytest.fail("run should not be called"),
+    )
+
+    result = testenv._cleanup_destroy_nodes()
+
+    assert result.outcome == "skipped"
+    assert "ensure-nodes.hcl" in result.detail
+
+
+def test_cleanup_kill_controller_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[object] = []
+
+    monkeypatch.setattr(testenv.jubilant, "Juju", lambda *args, **kwargs: object())
+    monkeypatch.setattr(testenv, "_juju_controller_exists", lambda juju, name: True)
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        commands.append(cmd)
+
+        class Result:
+            stdout = ""
+
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    result = testenv._cleanup_kill_controller(testenv.MAAS_CONTROLLER)
+
+    assert result.outcome == "ok"
+    assert commands == [
+        [
+            "juju",
+            "kill-controller",
+            testenv.MAAS_CONTROLLER,
+            "--no-prompt",
+            "--timeout",
+            "2m",
+        ]
+    ]
+
+
+def test_cleanup_kill_controller_skips_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(testenv.jubilant, "Juju", lambda *args, **kwargs: object())
+    monkeypatch.setattr(testenv, "_juju_controller_exists", lambda juju, name: False)
+    monkeypatch.setattr(
+        testenv,
+        "run",
+        lambda *args, **kwargs: pytest.fail("run should not be called"),
+    )
+
+    result = testenv._cleanup_kill_controller(testenv.MAAS_CONTROLLER)
+
+    assert result.outcome == "skipped"
+    assert testenv.MAAS_CONTROLLER in result.detail
+
+
+def test_cleanup_delete_vm_host_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[object] = []
+
+    monkeypatch.setattr(testenv, "_get_lxd_vm_host_id", lambda admin, vmhost: "321")
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        commands.append(cmd)
+
+        class Result:
+            stdout = ""
+
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    result = testenv._cleanup_delete_vm_host("admin", "local-lxd")
+
+    assert result.outcome == "ok"
+    assert commands == ["maas admin vm-host delete 321"]
+
+
+def test_cleanup_delete_vm_host_skips_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing_vmhost(admin: str, vmhost: str) -> str:
+        raise ClickException("missing")
+
+    monkeypatch.setattr(testenv, "_get_lxd_vm_host_id", missing_vmhost)
+    monkeypatch.setattr(
+        testenv,
+        "run",
+        lambda *args, **kwargs: pytest.fail("run should not be called"),
+    )
+
+    result = testenv._cleanup_delete_vm_host("admin", "local-lxd")
+
+    assert result.outcome == "skipped"
+    assert "local-lxd" in result.detail
+
+
+def test_cleanup_delete_known_lxd_instances_skips_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[object] = []
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        commands.append(cmd)
+
+        class Result:
+            def __init__(self, stdout: str = "", returncode: int = 0):
+                self.stdout = stdout
+                self.returncode = returncode
+
+        if cmd == ["lxc", "info", testenv.WARMUP_VM_NAME]:
+            return Result(returncode=1)
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    result = testenv._cleanup_delete_known_lxd_instances()
+
+    assert result.outcome == "skipped"
+    assert commands == [["lxc", "info", testenv.WARMUP_VM_NAME]]
+
+
+def test_cleanup_remove_state_files_preserves_cephtools_config(
+    state_home: Path,
+) -> None:
+    state_home.mkdir(parents=True, exist_ok=True)
+    for filename in (*testenv.TESTENV_STATE_FILENAMES, "cephtools.yaml"):
+        (state_home / filename).write_text(f"{filename}\n")
+
+    result = testenv._cleanup_remove_state_files()
+
+    assert result.outcome == "ok"
+    for filename in testenv.TESTENV_STATE_FILENAMES:
+        assert not (state_home / filename).exists()
+    assert (state_home / "cephtools.yaml").exists()
+
+
+def test_cleanup_remove_state_files_skips_missing(state_home: Path) -> None:
+    state_home.mkdir(parents=True, exist_ok=True)
+
+    result = testenv._cleanup_remove_state_files()
+
+    assert result.outcome == "skipped"
+
+
+def test_cleanup_remove_terragrunt_inputs_when_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    terragrunt_dir = tmp_path / "maas-nodes"
+    terragrunt_dir.mkdir(parents=True)
+    inputs_path = terragrunt_dir / testenv.ENSURE_NODES_INPUT_FILENAME
+    inputs_path.write_text("inputs = {}\n")
+    monkeypatch.setenv("CEPHTOOLS_TERRAGRUNT_DIR", str(terragrunt_dir))
+
+    result = testenv._cleanup_remove_terragrunt_inputs()
+
+    assert result.outcome == "ok"
+    assert not inputs_path.exists()
+
+
+def test_cleanup_remove_terragrunt_inputs_skips_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    terragrunt_dir = tmp_path / "maas-nodes"
+    terragrunt_dir.mkdir(parents=True)
+    monkeypatch.setenv("CEPHTOOLS_TERRAGRUNT_DIR", str(terragrunt_dir))
+
+    result = testenv._cleanup_remove_terragrunt_inputs()
+
+    assert result.outcome == "skipped"
+
+
+def test_cleanup_cli_dry_run_does_not_invoke_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(testenv, "primary_ip", lambda: "10.0.0.1")
+    monkeypatch.setattr(
+        testenv,
+        "run",
+        lambda *args, **kwargs: pytest.fail("run should not be called in dry-run"),
+    )
+
+    result = runner.invoke(testenv.cli, ["cleanup", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "Cleanup summary:" in result.output
+    assert "dry-run" in result.output.lower()
+
+
+def test_cleanup_cli_keep_flags_skip_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = CliRunner()
+    calls: list[str] = []
+
+    monkeypatch.setattr(testenv, "primary_ip", lambda: "10.0.0.1")
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_destroy_nodes",
+        lambda *args, **kwargs: calls.append("nodes"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_kill_controller",
+        lambda *args, **kwargs: calls.append("controller"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_delete_vm_host",
+        lambda *args, **kwargs: calls.append("vm-host"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_delete_known_lxd_instances",
+        lambda *args, **kwargs: calls.append("lxd"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_remove_state_files",
+        lambda *args, **kwargs: calls.append("state-files"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_remove_terragrunt_inputs",
+        lambda *args, **kwargs: calls.append("terragrunt-inputs"),
+    )
+
+    result = runner.invoke(
+        testenv.cli,
+        [
+            "cleanup",
+            "--keep-nodes",
+            "--keep-controller",
+            "--keep-vm-host",
+            "--keep-lxd-instances",
+            "--keep-state",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == []
+    assert result.output.count("skipped") >= 5
+
+
+def test_cleanup_cli_best_effort_reports_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    calls: list[str] = []
+
+    monkeypatch.setattr(testenv, "primary_ip", lambda: "10.0.0.1")
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_destroy_nodes",
+        lambda: calls.append("nodes")
+        or testenv.CleanupPhaseResult("destroy nodes", "failed", "boom"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_kill_controller",
+        lambda controller_name: calls.append("controller")
+        or testenv.CleanupPhaseResult(
+            f"kill controller {controller_name}", "ok", "removed"
+        ),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_delete_vm_host",
+        lambda admin, vmhost: calls.append("vm-host")
+        or testenv.CleanupPhaseResult(f"delete vm host {vmhost}", "skipped", "absent"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_delete_known_lxd_instances",
+        lambda: calls.append("lxd")
+        or testenv.CleanupPhaseResult("delete known LXD instances", "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_remove_state_files",
+        lambda: calls.append("state-files")
+        or testenv.CleanupPhaseResult("remove state files", "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_remove_terragrunt_inputs",
+        lambda: calls.append("terragrunt-inputs")
+        or testenv.CleanupPhaseResult("remove terragrunt inputs", "ok", "removed"),
+    )
+
+    result = runner.invoke(testenv.cli, ["cleanup"])
+
+    assert calls == [
+        "nodes",
+        "controller",
+        "vm-host",
+        "lxd",
+        "state-files",
+        "terragrunt-inputs",
+    ]
+    assert result.exit_code == 1
+    assert "destroy nodes: failed" in result.output
+    assert "kill controller" in result.output
+    assert "remove terragrunt inputs: ok" in result.output
