@@ -104,7 +104,7 @@ Below are the individual steps:
 - `cephtools testenv register-vm-host` registers the local LXD as a VM host in MAAS and kicks off boot-resource imports.
 - `cephtools testenv configure-network` : configures the default VLAN in MAAS (gateway, DHCP range, space) and records the details `state/network.yaml`.
 - `cephtools testenv ensure-nodes`: reconciles the VM inventory via Terragrunt; override the number of VMs and attached data disks with `--vm-count`, `--vm-data-disk-count`, and `--vm-data-disk-size`.
-- `cephtools testenv cleanup`: best-effort cleanup for testenv-managed lab resources and generated state. By default it destroys Terragrunt-managed nodes, kills the Juju controller, removes the configured MAAS VM host, deletes known transient LXD instances such as `warmup-vm`, and removes generated state files (`cloud.yaml`, `cred.yaml`, `network.yaml`) plus `ensure-nodes.hcl`. It intentionally preserves the installed MAAS/LXD/Juju/Terraform toolchain and `state/cephtools.yaml`.
+- `cephtools testenv cleanup`: best-effort cleanup for testenv-managed lab resources and generated state. By default it destroys Terragrunt-managed nodes, kills the Juju controller, removes the configured MAAS VM host, deletes known transient LXD instances such as `warmup-vm`, and removes generated state files (`cloud.yaml`, `cred.yaml`, `network.yaml`). `ensure-nodes.hcl` is removed only after node cleanup succeeds or there is no node state left to preserve. The command intentionally preserves the installed MAAS/LXD/Juju/Terraform toolchain and `state/cephtools.yaml`.
 - `cephtools testenv juju-init`: verifies MAAS/LXD health, installs Juju, writes credentials, onboards the cloud, and bootstraps the controller.
 
 Examples:

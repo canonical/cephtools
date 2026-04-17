@@ -77,6 +77,32 @@ def _format_juju_error(exc: jubilant.CLIError) -> str:
     return f"exit code {getattr(exc, 'returncode', 'unknown')}"
 
 
+def _format_process_error(
+    proc: subprocess.CalledProcessError | subprocess.CompletedProcess[str],
+) -> str:
+    stderr = (getattr(proc, "stderr", "") or "").strip()
+    stdout = (getattr(proc, "stdout", "") or "").strip()
+    if stderr:
+        return stderr
+    if stdout:
+        return stdout
+    return f"exit code {getattr(proc, 'returncode', 'unknown')}"
+
+
+def _message_indicates_not_found(message: str) -> bool:
+    normalized = message.lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "not found",
+            "does not exist",
+            "doesn't exist",
+            "no such",
+            "missing",
+        )
+    )
+
+
 def _resolve_terragrunt_dir() -> Path:
     env_path = os.getenv("CEPHTOOLS_TERRAGRUNT_DIR")
     candidates: list[Path] = []
@@ -1494,13 +1520,18 @@ def _cleanup_delete_vm_host(
 
     try:
         host_id = _get_lxd_vm_host_id(admin, vmhost)
-    except click.ClickException:
-        return CleanupPhaseResult(phase, "skipped", f"VM host {vmhost} not found")
+    except click.ClickException as exc:
+        detail = str(exc)
+        if _message_indicates_not_found(detail):
+            return CleanupPhaseResult(phase, "skipped", f"VM host {vmhost} not found")
+        return CleanupPhaseResult(phase, "failed", detail)
+    except subprocess.CalledProcessError as exc:
+        return CleanupPhaseResult(phase, "failed", _format_process_error(exc))
 
     try:
         run(f"maas {admin} vm-host delete {host_id}")
     except subprocess.CalledProcessError as exc:
-        return CleanupPhaseResult(phase, "failed", str(exc))
+        return CleanupPhaseResult(phase, "failed", _format_process_error(exc))
 
     return CleanupPhaseResult(phase, "ok", f"deleted MAAS VM host id {host_id}")
 
@@ -1520,11 +1551,18 @@ def _cleanup_delete_known_lxd_instances(*, dry_run: bool = False) -> CleanupPhas
     for instance_name in instance_names:
         info = run(["lxc", "info", instance_name], check=False, quiet=True)
         if info.returncode != 0:
-            continue
+            detail = _format_process_error(info)
+            if _message_indicates_not_found(detail):
+                continue
+            return CleanupPhaseResult(
+                phase,
+                "failed",
+                f"Failed to inspect LXD instance {instance_name}: {detail}",
+            )
         try:
             run(["lxc", "delete", instance_name, "--force"])
         except subprocess.CalledProcessError as exc:
-            return CleanupPhaseResult(phase, "failed", str(exc))
+            return CleanupPhaseResult(phase, "failed", _format_process_error(exc))
         deleted.append(instance_name)
 
     if not deleted:
@@ -1878,15 +1916,16 @@ def cleanup(
 
     results: list[CleanupPhaseResult] = []
     if keep_nodes:
-        results.append(
-            CleanupPhaseResult("destroy nodes", "skipped", "preserved by --keep-nodes")
+        nodes_result = CleanupPhaseResult(
+            "destroy nodes", "skipped", "preserved by --keep-nodes"
         )
     else:
-        results.append(
+        nodes_result = (
             _cleanup_destroy_nodes(dry_run=True)
             if dry_run
             else _cleanup_destroy_nodes()
         )
+    results.append(nodes_result)
 
     if keep_controller:
         results.append(
@@ -1961,11 +2000,28 @@ def cleanup(
             if dry_run
             else _cleanup_remove_state_files()
         )
-        results.append(
-            _cleanup_remove_terragrunt_inputs(dry_run=True)
-            if dry_run
-            else _cleanup_remove_terragrunt_inputs()
-        )
+        if keep_nodes:
+            results.append(
+                CleanupPhaseResult(
+                    "remove terragrunt inputs",
+                    "skipped",
+                    "preserved while nodes are kept",
+                )
+            )
+        elif nodes_result.failed:
+            results.append(
+                CleanupPhaseResult(
+                    "remove terragrunt inputs",
+                    "skipped",
+                    "preserved because node cleanup did not complete successfully",
+                )
+            )
+        else:
+            results.append(
+                _cleanup_remove_terragrunt_inputs(dry_run=True)
+                if dry_run
+                else _cleanup_remove_terragrunt_inputs()
+            )
 
     _emit_cleanup_summary(results)
     if any(result.failed for result in results):

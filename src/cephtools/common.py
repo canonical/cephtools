@@ -39,6 +39,7 @@ def run(
             check=check,
             text=True,
             stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             shell=True,
         )
 
@@ -52,6 +53,7 @@ def run(
         check=check,
         text=True,
         stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         shell=False,
     )
 
