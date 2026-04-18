@@ -4,6 +4,7 @@
 import json
 import os
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -54,6 +55,26 @@ BIND9_STOP_INTERVAL_SECONDS = 1
 LXD_INIT_RETRY_DELAY_SECONDS = 2
 WARMUP_VM_NAME = "warmup-vm"
 TESTENV_STATE_FILENAMES = ("cloud.yaml", "cred.yaml", "network.yaml")
+USER_JUJU_STATE_PATHS = (
+    Path("~/.local/share/juju").expanduser(),
+    Path("~/.cache/juju").expanduser(),
+    Path("~/.config/juju").expanduser(),
+    Path("~/.local/state/juju").expanduser(),
+)
+TESTENV_ROOT_RESIDUAL_PATHS = (
+    "/var/snap/lxd",
+    "/var/lib/lxd",
+    "/etc/lxd",
+    "/var/snap/maas",
+    "/etc/maas",
+    "/var/lib/maas",
+    "/var/log/maas",
+    "/etc/bind/maas",
+    "/var/lib/bind/maas",
+    "/etc/postgresql",
+    "/var/lib/postgresql",
+    "/var/log/postgresql",
+)
 
 
 @dataclass(frozen=True)
@@ -99,6 +120,7 @@ def _message_indicates_not_found(message: str) -> bool:
             "doesn't exist",
             "no such",
             "missing",
+            "no matching snaps installed",
         )
     )
 
@@ -1479,6 +1501,9 @@ def _cleanup_kill_controller(
             f"dry-run: would kill controller {controller_name}",
         )
 
+    if shutil.which("juju") is None:
+        return CleanupPhaseResult(phase, "skipped", "juju command not found")
+
     juju = jubilant.Juju()
     try:
         if not _juju_controller_exists(juju, controller_name):
@@ -1518,6 +1543,9 @@ def _cleanup_delete_vm_host(
             f"dry-run: would delete MAAS VM host {vmhost}",
         )
 
+    if shutil.which("maas") is None:
+        return CleanupPhaseResult(phase, "skipped", "maas command not found")
+
     try:
         host_id = _get_lxd_vm_host_id(admin, vmhost)
     except click.ClickException as exc:
@@ -1546,6 +1574,9 @@ def _cleanup_delete_known_lxd_instances(*, dry_run: bool = False) -> CleanupPhas
             "ok",
             f"dry-run: would delete {instances}",
         )
+
+    if shutil.which("lxc") is None:
+        return CleanupPhaseResult(phase, "skipped", "lxc command not found")
 
     deleted: list[str] = []
     for instance_name in instance_names:
@@ -1619,6 +1650,274 @@ def _cleanup_remove_terragrunt_inputs(*, dry_run: bool = False) -> CleanupPhaseR
 
     inputs_path.unlink(missing_ok=True)
     return CleanupPhaseResult(phase, "ok", f"removed {inputs_path}")
+
+
+def _installed_apt_packages(
+    *,
+    prefixes: tuple[str, ...] = (),
+    exact_names: tuple[str, ...] = (),
+) -> list[str]:
+    result = run(
+        ["dpkg-query", "-W", "-f=${binary:Package}\t${Status}\n"],
+        check=False,
+        quiet=True,
+    )
+    if result.returncode != 0:
+        raise click.ClickException(_format_process_error(result))
+
+    matches: list[str] = []
+    exact = set(exact_names)
+    for line in result.stdout.splitlines():
+        package, _, status = line.partition("\t")
+        if status.strip() != "install ok installed":
+            continue
+        if package in exact or any(package.startswith(prefix) for prefix in prefixes):
+            matches.append(package)
+    return sorted(matches)
+
+
+
+def _cleanup_remove_snap(name: str, *, dry_run: bool = False) -> CleanupPhaseResult:
+    phase = f"remove snap {name}"
+    if dry_run:
+        return CleanupPhaseResult(phase, "ok", f"dry-run: would remove snap {name}")
+
+    result = run(["snap", "list", name], check=False, quiet=True)
+    if result.returncode != 0:
+        detail = _format_process_error(result)
+        if _message_indicates_not_found(detail):
+            return CleanupPhaseResult(phase, "skipped", f"snap {name} is not installed")
+        return CleanupPhaseResult(phase, "failed", detail)
+
+    try:
+        run(["sudo", "snap", "remove", "--purge", name])
+    except subprocess.CalledProcessError as exc:
+        return CleanupPhaseResult(phase, "failed", _format_process_error(exc))
+
+    return CleanupPhaseResult(phase, "ok", f"removed snap {name}")
+
+
+
+def _cleanup_remove_user_paths(
+    phase: str,
+    paths: tuple[Path, ...],
+    *,
+    dry_run: bool = False,
+) -> CleanupPhaseResult:
+    existing = [path for path in paths if path.exists() or path.is_symlink()]
+    if not existing:
+        return CleanupPhaseResult(phase, "skipped", "No matching paths found")
+
+    if dry_run:
+        rendered = ", ".join(str(path) for path in existing)
+        return CleanupPhaseResult(phase, "ok", f"dry-run: would remove {rendered}")
+
+    removed: list[str] = []
+    try:
+        for path in existing:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
+            removed.append(str(path))
+    except OSError as exc:
+        return CleanupPhaseResult(phase, "failed", str(exc))
+
+    return CleanupPhaseResult(phase, "ok", f"removed {', '.join(removed)}")
+
+
+
+def _root_path_exists(path: str) -> bool:
+    result = run(["sudo", "test", "-e", path], check=False, quiet=True)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise click.ClickException(_format_process_error(result))
+
+
+
+def _cleanup_remove_root_paths(
+    phase: str,
+    paths: tuple[str, ...],
+    *,
+    dry_run: bool = False,
+) -> CleanupPhaseResult:
+    try:
+        existing = [path for path in paths if _root_path_exists(path)]
+    except click.ClickException as exc:
+        return CleanupPhaseResult(phase, "failed", str(exc))
+
+    if not existing:
+        return CleanupPhaseResult(phase, "skipped", "No matching paths found")
+
+    if dry_run:
+        rendered = ", ".join(existing)
+        return CleanupPhaseResult(phase, "ok", f"dry-run: would remove {rendered}")
+
+    try:
+        run(["sudo", "rm", "-rf", *existing])
+    except subprocess.CalledProcessError as exc:
+        return CleanupPhaseResult(phase, "failed", _format_process_error(exc))
+
+    return CleanupPhaseResult(phase, "ok", f"removed {', '.join(existing)}")
+
+
+
+def _cleanup_purge_apt_packages(
+    phase: str,
+    *,
+    prefixes: tuple[str, ...] = (),
+    exact_names: tuple[str, ...] = (),
+    dry_run: bool = False,
+) -> CleanupPhaseResult:
+    try:
+        packages = _installed_apt_packages(prefixes=prefixes, exact_names=exact_names)
+    except click.ClickException as exc:
+        return CleanupPhaseResult(phase, "failed", str(exc))
+
+    if not packages:
+        return CleanupPhaseResult(phase, "skipped", "No matching apt packages installed")
+
+    if dry_run:
+        rendered = ", ".join(packages)
+        return CleanupPhaseResult(phase, "ok", f"dry-run: would purge {rendered}")
+
+    try:
+        run(
+            [
+                "sudo",
+                "env",
+                "DEBIAN_FRONTEND=noninteractive",
+                "apt-get",
+                "-y",
+                "purge",
+                *packages,
+            ]
+        )
+    except subprocess.CalledProcessError as exc:
+        return CleanupPhaseResult(phase, "failed", _format_process_error(exc))
+
+    return CleanupPhaseResult(phase, "ok", f"purged {', '.join(packages)}")
+
+
+
+def _maas_ppa_source_paths() -> list[Path]:
+    sources_dir = Path("/etc/apt/sources.list.d")
+    if not sources_dir.exists():
+        return []
+
+    markers = ("ppa.launchpadcontent.net/maas/", "ppa.launchpad.net/maas/")
+    matches: list[Path] = []
+    for path in sorted(sources_dir.iterdir()):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if any(marker in text for marker in markers):
+            matches.append(path)
+    return matches
+
+
+
+def _cleanup_remove_maas_ppa_sources(*, dry_run: bool = False) -> CleanupPhaseResult:
+    phase = "remove MAAS apt sources"
+    paths = _maas_ppa_source_paths()
+    if not paths:
+        return CleanupPhaseResult(phase, "skipped", "No MAAS apt source files found")
+
+    rendered = ", ".join(str(path) for path in paths)
+    if dry_run:
+        return CleanupPhaseResult(phase, "ok", f"dry-run: would remove {rendered}")
+
+    try:
+        run(["sudo", "rm", "-f", *[str(path) for path in paths]])
+    except subprocess.CalledProcessError as exc:
+        return CleanupPhaseResult(phase, "failed", _format_process_error(exc))
+
+    return CleanupPhaseResult(phase, "ok", f"removed {rendered}")
+
+
+
+def _cleanup_apt_autoremove(*, dry_run: bool = False) -> CleanupPhaseResult:
+    phase = "apt autoremove --purge"
+    if dry_run:
+        return CleanupPhaseResult(
+            phase,
+            "ok",
+            "dry-run: would run apt-get -y autoremove --purge",
+        )
+
+    try:
+        run(
+            [
+                "sudo",
+                "env",
+                "DEBIAN_FRONTEND=noninteractive",
+                "apt-get",
+                "-y",
+                "autoremove",
+                "--purge",
+            ]
+        )
+    except subprocess.CalledProcessError as exc:
+        return CleanupPhaseResult(phase, "failed", _format_process_error(exc))
+
+    return CleanupPhaseResult(phase, "ok", "completed apt autoremove --purge")
+
+
+
+def _cleanup_apt_update(*, dry_run: bool = False) -> CleanupPhaseResult:
+    phase = "apt update"
+    if dry_run:
+        return CleanupPhaseResult(phase, "ok", "dry-run: would run apt-get update")
+
+    try:
+        run(["sudo", "apt-get", "update"])
+    except subprocess.CalledProcessError as exc:
+        return CleanupPhaseResult(phase, "failed", _format_process_error(exc))
+
+    return CleanupPhaseResult(phase, "ok", "updated apt package lists")
+
+
+
+def _cleanup_restore_systemd_timesyncd(*, dry_run: bool = False) -> CleanupPhaseResult:
+    phase = "restore systemd-timesyncd"
+    if dry_run:
+        return CleanupPhaseResult(
+            phase,
+            "ok",
+            "dry-run: would install and enable systemd-timesyncd if needed",
+        )
+
+    try:
+        installed = bool(_installed_apt_packages(exact_names=("systemd-timesyncd",)))
+    except click.ClickException as exc:
+        return CleanupPhaseResult(phase, "failed", str(exc))
+
+    try:
+        if not installed:
+            run(
+                [
+                    "sudo",
+                    "env",
+                    "DEBIAN_FRONTEND=noninteractive",
+                    "apt-get",
+                    "-y",
+                    "install",
+                    "systemd-timesyncd",
+                ]
+            )
+        run(["sudo", "systemctl", "enable", "--now", "systemd-timesyncd"])
+    except subprocess.CalledProcessError as exc:
+        return CleanupPhaseResult(phase, "failed", _format_process_error(exc))
+
+    if installed:
+        return CleanupPhaseResult(phase, "ok", "enabled systemd-timesyncd")
+    return CleanupPhaseResult(phase, "ok", "installed and enabled systemd-timesyncd")
+
 
 
 def _emit_cleanup_summary(results: list[CleanupPhaseResult]) -> None:
@@ -1901,6 +2200,15 @@ def destroy_nodes(ctx):
     is_flag=True,
     help="Do not remove generated state files or Terragrunt inputs.",
 )
+@click.option(
+    "--purge-installed",
+    is_flag=True,
+    help=(
+        "Also remove the testenv-installed toolchain for maximum isolation "
+        "(MAAS, PostgreSQL, LXD, Juju, Terraform, Terragrunt, and local Juju state). "
+        "Incompatible with --keep-* flags."
+    ),
+)
 @click.pass_context
 def cleanup(
     ctx,
@@ -1910,7 +2218,23 @@ def cleanup(
     keep_vm_host: bool,
     keep_lxd_instances: bool,
     keep_state: bool,
+    purge_installed: bool,
 ) -> None:
+    preserve_flags = {
+        "--keep-nodes": keep_nodes,
+        "--keep-controller": keep_controller,
+        "--keep-vm-host": keep_vm_host,
+        "--keep-lxd-instances": keep_lxd_instances,
+        "--keep-state": keep_state,
+    }
+    incompatible_flags = [flag for flag, enabled in preserve_flags.items() if enabled]
+    if purge_installed and incompatible_flags:
+        joined_flags = ", ".join(incompatible_flags)
+        raise click.ClickException(
+            "--purge-installed cannot be combined with preservation flags: "
+            f"{joined_flags}"
+        )
+
     if dry_run:
         click.echo("Running cleanup in dry-run mode; no changes will be made.")
 
@@ -2008,7 +2332,7 @@ def cleanup(
                     "preserved while nodes are kept",
                 )
             )
-        elif nodes_result.failed:
+        elif nodes_result.failed and not purge_installed:
             results.append(
                 CleanupPhaseResult(
                     "remove terragrunt inputs",
@@ -2022,6 +2346,93 @@ def cleanup(
                 if dry_run
                 else _cleanup_remove_terragrunt_inputs()
             )
+
+    if purge_installed:
+        results.extend(
+            [
+                _cleanup_remove_snap("juju", dry_run=True)
+                if dry_run
+                else _cleanup_remove_snap("juju"),
+                _cleanup_remove_user_paths(
+                    "remove Juju local state",
+                    USER_JUJU_STATE_PATHS,
+                    dry_run=True,
+                )
+                if dry_run
+                else _cleanup_remove_user_paths(
+                    "remove Juju local state",
+                    USER_JUJU_STATE_PATHS,
+                ),
+                _cleanup_purge_apt_packages(
+                    "purge MAAS apt packages",
+                    prefixes=("maas", "python3-maas", "bind9"),
+                    dry_run=True,
+                )
+                if dry_run
+                else _cleanup_purge_apt_packages(
+                    "purge MAAS apt packages",
+                    prefixes=("maas", "python3-maas", "bind9"),
+                ),
+                _cleanup_purge_apt_packages(
+                    "purge PostgreSQL apt packages",
+                    prefixes=("postgresql",),
+                    dry_run=True,
+                )
+                if dry_run
+                else _cleanup_purge_apt_packages(
+                    "purge PostgreSQL apt packages",
+                    prefixes=("postgresql",),
+                ),
+                _cleanup_purge_apt_packages(
+                    "purge testenv helper apt packages",
+                    exact_names=("software-properties-common", "lxd-installer"),
+                    dry_run=True,
+                )
+                if dry_run
+                else _cleanup_purge_apt_packages(
+                    "purge testenv helper apt packages",
+                    exact_names=("software-properties-common", "lxd-installer"),
+                ),
+                _cleanup_apt_autoremove(dry_run=True)
+                if dry_run
+                else _cleanup_apt_autoremove(),
+                _cleanup_remove_maas_ppa_sources(dry_run=True)
+                if dry_run
+                else _cleanup_remove_maas_ppa_sources(),
+                _cleanup_apt_update(dry_run=True)
+                if dry_run
+                else _cleanup_apt_update(),
+                _cleanup_restore_systemd_timesyncd(dry_run=True)
+                if dry_run
+                else _cleanup_restore_systemd_timesyncd(),
+                _cleanup_remove_snap("lxd", dry_run=True)
+                if dry_run
+                else _cleanup_remove_snap("lxd"),
+                _cleanup_remove_snap("terraform", dry_run=True)
+                if dry_run
+                else _cleanup_remove_snap("terraform"),
+                _cleanup_remove_root_paths(
+                    "remove Terragrunt binary",
+                    ("/usr/local/bin/terragrunt",),
+                    dry_run=True,
+                )
+                if dry_run
+                else _cleanup_remove_root_paths(
+                    "remove Terragrunt binary",
+                    ("/usr/local/bin/terragrunt",),
+                ),
+                _cleanup_remove_root_paths(
+                    "remove residual toolchain directories",
+                    TESTENV_ROOT_RESIDUAL_PATHS,
+                    dry_run=True,
+                )
+                if dry_run
+                else _cleanup_remove_root_paths(
+                    "remove residual toolchain directories",
+                    TESTENV_ROOT_RESIDUAL_PATHS,
+                ),
+            ]
+        )
 
     _emit_cleanup_summary(results)
     if any(result.failed for result in results):

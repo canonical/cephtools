@@ -104,7 +104,7 @@ Below are the individual steps:
 - `cephtools testenv register-vm-host` registers the local LXD as a VM host in MAAS and kicks off boot-resource imports.
 - `cephtools testenv configure-network` : configures the default VLAN in MAAS (gateway, DHCP range, space) and records the details `state/network.yaml`.
 - `cephtools testenv ensure-nodes`: reconciles the VM inventory via Terragrunt; override the number of VMs and attached data disks with `--vm-count`, `--vm-data-disk-count`, and `--vm-data-disk-size`.
-- `cephtools testenv cleanup`: best-effort cleanup for testenv-managed lab resources and generated state. By default it destroys Terragrunt-managed nodes, kills the Juju controller, removes the configured MAAS VM host, deletes known transient LXD instances such as `warmup-vm`, and removes generated state files (`cloud.yaml`, `cred.yaml`, `network.yaml`). `ensure-nodes.hcl` is removed only after node cleanup succeeds or there is no node state left to preserve. The command intentionally preserves the installed MAAS/LXD/Juju/Terraform toolchain and `state/cephtools.yaml`.
+- `cephtools testenv cleanup`: best-effort cleanup for testenv-managed lab resources and generated state. By default it destroys Terragrunt-managed nodes, kills the Juju controller, removes the configured MAAS VM host, deletes known transient LXD instances such as `warmup-vm`, and removes generated state files (`cloud.yaml`, `cred.yaml`, `network.yaml`). `ensure-nodes.hcl` is removed only after node cleanup succeeds or there is no node state left to preserve. By default the command preserves the installed MAAS/LXD/Juju/Terraform toolchain and `state/cephtools.yaml`; add `--purge-installed` for maximum isolation to also remove the testenv-installed toolchain (MAAS, PostgreSQL, LXD, Juju, Terraform, Terragrunt, local Juju state, LXD installer stubs, and related residual directories).
 - `cephtools testenv juju-init`: verifies MAAS/LXD health, installs Juju, writes credentials, onboards the cloud, and bootstraps the controller.
 
 Examples:
@@ -118,9 +118,12 @@ cephtools testenv cleanup --dry-run
 
 # Keep the Juju controller and generated state, but clean the rest
 cephtools testenv cleanup --keep-controller --keep-state
+
+# Maximum-isolation cleanup: also purge the installed testenv toolchain
+cephtools testenv cleanup --purge-installed
 ```
 
-`cleanup` is idempotent and best effort: if a phase has nothing to remove it is reported as skipped, later phases still run after an earlier failure, and the command exits non-zero only after printing the final summary when at least one phase failed.
+`cleanup` is idempotent and best effort: if a phase has nothing to remove it is reported as skipped, later phases still run after an earlier failure, and the command exits non-zero only after printing the final summary when at least one phase failed. `--purge-installed` is intentionally destructive and cannot be combined with `--keep-*` preservation flags.
 
 Set `CEPHTOOLS_TERRAGRUNT_DIR` or the `terragrunt_dir` key in `cephtools.yaml` to point at your Terragrunt plans if they live outside the repository. The MicroCeph Terragrunt/Terraform module now lives in the
 [charm-microceph](https://github.com/canonical/charm-microceph/tree/main/terraform/microceph) repository.

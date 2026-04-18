@@ -1353,6 +1353,7 @@ def test_cleanup_kill_controller_when_present(
 ) -> None:
     commands: list[object] = []
 
+    monkeypatch.setattr(testenv.shutil, "which", lambda name: "/bin/true")
     monkeypatch.setattr(testenv.jubilant, "Juju", lambda *args, **kwargs: object())
     monkeypatch.setattr(testenv, "_juju_controller_exists", lambda juju, name: True)
 
@@ -1384,6 +1385,7 @@ def test_cleanup_kill_controller_when_present(
 def test_cleanup_kill_controller_skips_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(testenv.shutil, "which", lambda name: "/bin/true")
     monkeypatch.setattr(testenv.jubilant, "Juju", lambda *args, **kwargs: object())
     monkeypatch.setattr(testenv, "_juju_controller_exists", lambda juju, name: False)
     monkeypatch.setattr(
@@ -1403,6 +1405,7 @@ def test_cleanup_delete_vm_host_when_present(
 ) -> None:
     commands: list[object] = []
 
+    monkeypatch.setattr(testenv.shutil, "which", lambda name: "/bin/true")
     monkeypatch.setattr(testenv, "_get_lxd_vm_host_id", lambda admin, vmhost: "321")
 
     def fake_run(cmd, check=True, shell=False, quiet=False):
@@ -1427,6 +1430,7 @@ def test_cleanup_delete_vm_host_skips_missing(
     def missing_vmhost(admin: str, vmhost: str) -> str:
         raise ClickException("VM host 'local-lxd' not found in MAAS vm-hosts output.")
 
+    monkeypatch.setattr(testenv.shutil, "which", lambda name: "/bin/true")
     monkeypatch.setattr(testenv, "_get_lxd_vm_host_id", missing_vmhost)
     monkeypatch.setattr(
         testenv,
@@ -1450,6 +1454,7 @@ def test_cleanup_delete_vm_host_reports_lookup_failure(
             stderr="auth failed",
         )
 
+    monkeypatch.setattr(testenv.shutil, "which", lambda name: "/bin/true")
     monkeypatch.setattr(testenv, "_get_lxd_vm_host_id", broken_lookup)
 
     result = testenv._cleanup_delete_vm_host("admin", "local-lxd")
@@ -1462,6 +1467,8 @@ def test_cleanup_delete_known_lxd_instances_skips_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     commands: list[object] = []
+
+    monkeypatch.setattr(testenv.shutil, "which", lambda name: "/bin/true")
 
     def fake_run(cmd, check=True, shell=False, quiet=False):
         commands.append(cmd)
@@ -1487,6 +1494,8 @@ def test_cleanup_delete_known_lxd_instances_skips_missing(
 def test_cleanup_delete_known_lxd_instances_reports_inspection_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(testenv.shutil, "which", lambda name: "/bin/true")
+
     def fake_run(cmd, check=True, shell=False, quiet=False):
         class Result:
             def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0):
@@ -1738,3 +1747,274 @@ def test_cleanup_cli_best_effort_reports_failures(
     assert (
         "preserved because node cleanup did not complete successfully" in result.output
     )
+
+
+
+def test_cleanup_cli_purge_installed_rejects_keep_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(testenv, "primary_ip", lambda: "10.0.0.1")
+
+    result = runner.invoke(
+        testenv.cli,
+        ["cleanup", "--purge-installed", "--keep-state"],
+    )
+
+    assert result.exit_code == 1
+    assert "--purge-installed cannot be combined" in result.output
+    assert "--keep-state" in result.output
+
+
+
+def test_cleanup_cli_purge_installed_runs_extended_phases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    calls: list[str] = []
+
+    monkeypatch.setattr(testenv, "primary_ip", lambda: "10.0.0.1")
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_destroy_nodes",
+        lambda: calls.append("nodes")
+        or testenv.CleanupPhaseResult("destroy nodes", "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_kill_controller",
+        lambda controller_name: calls.append("controller")
+        or testenv.CleanupPhaseResult(
+            f"kill controller {controller_name}", "ok", "removed"
+        ),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_delete_vm_host",
+        lambda admin, vmhost: calls.append("vm-host")
+        or testenv.CleanupPhaseResult(f"delete vm host {vmhost}", "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_delete_known_lxd_instances",
+        lambda: calls.append("delete-lxd-instances")
+        or testenv.CleanupPhaseResult("delete known LXD instances", "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_remove_state_files",
+        lambda: calls.append("state-files")
+        or testenv.CleanupPhaseResult("remove state files", "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_remove_terragrunt_inputs",
+        lambda: calls.append("terragrunt-inputs")
+        or testenv.CleanupPhaseResult("remove terragrunt inputs", "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_remove_snap",
+        lambda name: calls.append(f"snap:{name}")
+        or testenv.CleanupPhaseResult(f"remove snap {name}", "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_remove_user_paths",
+        lambda phase, paths: calls.append("juju-state")
+        or testenv.CleanupPhaseResult(phase, "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_purge_apt_packages",
+        lambda phase, prefixes=(), exact_names=(): calls.append(phase)
+        or testenv.CleanupPhaseResult(phase, "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_apt_autoremove",
+        lambda: calls.append("apt-autoremove")
+        or testenv.CleanupPhaseResult("apt autoremove --purge", "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_remove_maas_ppa_sources",
+        lambda: calls.append("maas-ppa")
+        or testenv.CleanupPhaseResult("remove MAAS apt sources", "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_apt_update",
+        lambda: calls.append("apt-update")
+        or testenv.CleanupPhaseResult("apt update", "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_restore_systemd_timesyncd",
+        lambda: calls.append("timesyncd")
+        or testenv.CleanupPhaseResult(
+            "restore systemd-timesyncd", "ok", "removed"
+        ),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_remove_root_paths",
+        lambda phase, paths: calls.append(phase)
+        or testenv.CleanupPhaseResult(phase, "ok", "removed"),
+    )
+
+    result = runner.invoke(testenv.cli, ["cleanup", "--purge-installed"])
+
+    assert result.exit_code == 0
+    assert calls == [
+        "nodes",
+        "controller",
+        "vm-host",
+        "delete-lxd-instances",
+        "state-files",
+        "terragrunt-inputs",
+        "snap:juju",
+        "juju-state",
+        "purge MAAS apt packages",
+        "purge PostgreSQL apt packages",
+        "purge testenv helper apt packages",
+        "apt-autoremove",
+        "maas-ppa",
+        "apt-update",
+        "timesyncd",
+        "snap:lxd",
+        "snap:terraform",
+        "remove Terragrunt binary",
+        "remove residual toolchain directories",
+    ]
+
+
+
+def test_cleanup_kill_controller_skips_when_juju_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(testenv.shutil, "which", lambda name: None if name == "juju" else "/bin/true")
+
+    result = testenv._cleanup_kill_controller("maas-controller")
+
+    assert result.outcome == "skipped"
+    assert result.detail == "juju command not found"
+
+
+
+def test_cleanup_delete_vm_host_skips_when_maas_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(testenv.shutil, "which", lambda name: None if name == "maas" else "/bin/true")
+
+    result = testenv._cleanup_delete_vm_host("admin", "local-lxd")
+
+    assert result.outcome == "skipped"
+    assert result.detail == "maas command not found"
+
+
+
+def test_cleanup_delete_known_lxd_instances_skips_when_lxc_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(testenv.shutil, "which", lambda name: None if name == "lxc" else "/bin/true")
+
+    result = testenv._cleanup_delete_known_lxd_instances()
+
+    assert result.outcome == "skipped"
+    assert result.detail == "lxc command not found"
+
+
+
+def test_cleanup_cli_purge_installed_removes_terragrunt_inputs_after_node_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    calls: list[str] = []
+
+    monkeypatch.setattr(testenv, "primary_ip", lambda: "10.0.0.1")
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_destroy_nodes",
+        lambda: calls.append("nodes")
+        or testenv.CleanupPhaseResult("destroy nodes", "failed", "boom"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_kill_controller",
+        lambda controller_name: testenv.CleanupPhaseResult(
+            f"kill controller {controller_name}", "ok", "removed"
+        ),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_delete_vm_host",
+        lambda admin, vmhost: testenv.CleanupPhaseResult(
+            f"delete vm host {vmhost}", "ok", "removed"
+        ),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_delete_known_lxd_instances",
+        lambda: testenv.CleanupPhaseResult("delete known LXD instances", "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_remove_state_files",
+        lambda: testenv.CleanupPhaseResult("remove state files", "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_remove_terragrunt_inputs",
+        lambda: calls.append("terragrunt-inputs")
+        or testenv.CleanupPhaseResult("remove terragrunt inputs", "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_remove_snap",
+        lambda name: testenv.CleanupPhaseResult(f"remove snap {name}", "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_remove_user_paths",
+        lambda phase, paths: testenv.CleanupPhaseResult(phase, "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_purge_apt_packages",
+        lambda phase, prefixes=(), exact_names=(): testenv.CleanupPhaseResult(
+            phase, "ok", "removed"
+        ),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_apt_autoremove",
+        lambda: testenv.CleanupPhaseResult("apt autoremove --purge", "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_remove_maas_ppa_sources",
+        lambda: testenv.CleanupPhaseResult("remove MAAS apt sources", "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_apt_update",
+        lambda: testenv.CleanupPhaseResult("apt update", "ok", "removed"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_restore_systemd_timesyncd",
+        lambda: testenv.CleanupPhaseResult(
+            "restore systemd-timesyncd", "ok", "removed"
+        ),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_remove_root_paths",
+        lambda phase, paths: testenv.CleanupPhaseResult(phase, "ok", "removed"),
+    )
+
+    result = runner.invoke(testenv.cli, ["cleanup", "--purge-installed"])
+
+    assert result.exit_code == 1
+    assert calls == ["nodes", "terragrunt-inputs"]
