@@ -1460,6 +1460,11 @@ def _destroy_nodes_impl() -> None:
     )
 
 
+def _terragrunt_dir_not_found_detail(detail: str) -> bool:
+    return "Unable to locate terragrunt configuration directory." in detail
+
+
+
 def _cleanup_destroy_nodes(*, dry_run: bool = False) -> CleanupPhaseResult:
     phase = "destroy nodes"
     if dry_run:
@@ -1472,7 +1477,14 @@ def _cleanup_destroy_nodes(*, dry_run: bool = False) -> CleanupPhaseResult:
     try:
         terragrunt_dir = _resolve_terragrunt_dir()
     except click.ClickException as exc:
-        return CleanupPhaseResult(phase, "failed", str(exc))
+        detail = str(exc)
+        if _terragrunt_dir_not_found_detail(detail):
+            return CleanupPhaseResult(
+                phase,
+                "skipped",
+                "terragrunt configuration directory not found; no Terragrunt-managed nodes to destroy",
+            )
+        return CleanupPhaseResult(phase, "failed", detail)
 
     inputs_path = terragrunt_dir / ENSURE_NODES_INPUT_FILENAME
     if not inputs_path.exists():
@@ -1642,7 +1654,14 @@ def _cleanup_remove_terragrunt_inputs(*, dry_run: bool = False) -> CleanupPhaseR
     try:
         terragrunt_dir = _resolve_terragrunt_dir()
     except click.ClickException as exc:
-        return CleanupPhaseResult(phase, "failed", str(exc))
+        detail = str(exc)
+        if _terragrunt_dir_not_found_detail(detail):
+            return CleanupPhaseResult(
+                phase,
+                "skipped",
+                "terragrunt configuration directory not found; no Terragrunt inputs to remove",
+            )
+        return CleanupPhaseResult(phase, "failed", detail)
 
     inputs_path = terragrunt_dir / ENSURE_NODES_INPUT_FILENAME
     if not inputs_path.exists():

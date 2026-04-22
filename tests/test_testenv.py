@@ -1348,6 +1348,26 @@ def test_cleanup_destroy_nodes_skips_missing_inputs(
     assert "ensure-nodes.hcl" in result.detail
 
 
+
+def test_cleanup_destroy_nodes_skips_missing_terragrunt_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CEPHTOOLS_TERRAGRUNT_DIR", raising=False)
+    monkeypatch.setattr(
+        testenv,
+        "_resolve_terragrunt_dir",
+        lambda: (_ for _ in ()).throw(
+            ClickException("Unable to locate terragrunt configuration directory.")
+        ),
+    )
+
+    result = testenv._cleanup_destroy_nodes()
+
+    assert result.outcome == "skipped"
+    assert "no Terragrunt-managed nodes to destroy" in result.detail
+
+
+
 def test_cleanup_kill_controller_when_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1563,6 +1583,26 @@ def test_cleanup_remove_terragrunt_inputs_skips_missing(
     result = testenv._cleanup_remove_terragrunt_inputs()
 
     assert result.outcome == "skipped"
+
+
+
+def test_cleanup_remove_terragrunt_inputs_skips_missing_terragrunt_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CEPHTOOLS_TERRAGRUNT_DIR", raising=False)
+    monkeypatch.setattr(
+        testenv,
+        "_resolve_terragrunt_dir",
+        lambda: (_ for _ in ()).throw(
+            ClickException("Unable to locate terragrunt configuration directory.")
+        ),
+    )
+
+    result = testenv._cleanup_remove_terragrunt_inputs()
+
+    assert result.outcome == "skipped"
+    assert "no Terragrunt inputs to remove" in result.detail
+
 
 
 def test_cleanup_cli_dry_run_does_not_invoke_run(
