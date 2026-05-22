@@ -612,8 +612,9 @@ def test_ensure_lxd_network_creates_without_dns_or_dhcp(monkeypatch):
 
     assert commands == [
         "lxc query /1.0/networks",
-        "lxc network create ext ipv4.address=auto ipv4.nat=true ipv4.dhcp=false ipv6.address=none ipv6.dhcp=false dns.mode=none",
+        "lxc network create ext ipv4.address=auto ipv4.nat=true ipv4.dhcp=false ipv6.address=none ipv6.dhcp=false dns.mode=none raw.dnsmasq=port=0",
         ["lxc", "network", "set", "ext", "dns.mode=none"],
+        ["lxc", "network", "set", "ext", "raw.dnsmasq=port=0"],
         ["lxc", "network", "set", "ext", "ipv4.dhcp=false"],
         ["lxc", "network", "set", "ext", "ipv6.dhcp=false"],
     ]
@@ -637,8 +638,88 @@ def test_ensure_lxd_network_updates_existing_network(monkeypatch):
     assert commands == [
         "lxc query /1.0/networks",
         ["lxc", "network", "set", "lxdbr0", "dns.mode=none"],
+        ["lxc", "network", "set", "lxdbr0", "raw.dnsmasq=port=0"],
         ["lxc", "network", "set", "lxdbr0", "ipv4.dhcp=false"],
         ["lxc", "network", "set", "lxdbr0", "ipv6.dhcp=false"],
+    ]
+
+
+def test_ensure_lxd_host_network_creates_with_dns_and_dhcp(monkeypatch):
+    commands: list[object] = []
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        commands.append(cmd)
+
+        class Result:
+            stdout = "[]" if cmd == "lxc query /1.0/networks" else ""
+
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    testenv.ensure_lxd_host_network("lxdbr0")
+
+    assert commands == [
+        "lxc query /1.0/networks",
+        "lxc network create lxdbr0 ipv4.address=auto ipv4.nat=true ipv4.dhcp=true ipv6.address=none ipv6.dhcp=false dns.mode=managed",
+        ["lxc", "network", "set", "lxdbr0", "dns.mode=managed"],
+        ["lxc", "network", "set", "lxdbr0", "ipv4.dhcp=true"],
+        ["lxc", "network", "set", "lxdbr0", "ipv6.dhcp=false"],
+    ]
+
+
+def test_render_maas_vm_bootstrap_script_uses_maas_snap():
+    script = testenv.render_maas_vm_bootstrap_script(
+        "http://10.0.0.2:5240/MAAS",
+        "admin",
+        "secret",
+        "admin@example.com",
+        "3.7",
+    )
+
+    assert "snap install maas-test-db" in script
+    assert "snap install maas --channel=3.7/stable" in script
+    assert "maas init region+rack --database-uri maas-test-db:///" in script
+    assert "maas createadmin --username admin" in script
+
+
+def test_lxd_init_vm_impl_does_not_touch_bind9(monkeypatch):
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        testenv, "_configure_lxd_common", lambda admin_pw: calls.append(("common", admin_pw))
+    )
+    monkeypatch.setattr(
+        testenv,
+        "ensure_lxd_host_network",
+        lambda name: calls.append(("host-network", name)),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "ensure_lxd_default_profile_network",
+        lambda name: calls.append(("profile", name)),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "ensure_lxd_maas_network",
+        lambda name: calls.append(("maas-network", name)),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "ensure_lxd_maas_project",
+        lambda project, network: calls.append(("project", (project, network))),
+    )
+    monkeypatch.setattr(testenv.time, "sleep", lambda seconds: calls.append(("sleep", seconds)))
+
+    testenv.lxd_init_vm_impl("secret", "lxdbr0", "maasbr0", "maas")
+
+    assert calls == [
+        ("common", "secret"),
+        ("host-network", "lxdbr0"),
+        ("profile", "lxdbr0"),
+        ("maas-network", "maasbr0"),
+        ("project", ("maas", "maasbr0")),
+        ("sleep", 2),
     ]
 
 

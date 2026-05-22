@@ -24,12 +24,21 @@ DEFAULT_TESTFLINGER_DEPLOY_RESERVE_FOR = 21600
 
 DEFAULT_JUJU_MODEL = "cephtools"
 
-_TESTENV_DEFAULTS_FALLBACK: dict[str, str] = {
+_TESTENV_DEFAULTS_FALLBACK: dict[str, Any] = {
     "maas_version": "3.7",
     "admin": "admin",
     "admin_pw": "maaspass",
     "admin_mail": "admin@example.com",
     "lxdbridge": "lxdbr0",
+    "maas_lxdbridge": "maasbr0",
+    "maas_mode": "host",
+    "maas_vm_name": "maas-vm",
+    "maas_vm_cpus": 8,
+    "maas_vm_memory": "16GiB",
+    "maas_vm_disk": "80GiB",
+    "maas_vm_ip": None,
+    "maas_vm_image": "ubuntu:24.04",
+    "maas_lxd_project": "maas",
     "vmhost": "local-lxd",
     "maas_tag": "cephtools",
 }
@@ -123,7 +132,7 @@ def load_cephtools_config(
     return section
 
 
-def load_testenv_defaults(path: Path | None = None) -> dict[str, str]:
+def load_testenv_defaults(path: Path | None = None) -> dict[str, Any]:
     """Return testenv defaults from the configuration."""
     config_section = load_cephtools_config(path, ensure=True)
     testenv_section = config_section.get("testenv")
@@ -149,7 +158,17 @@ def load_testenv_defaults(path: Path | None = None) -> dict[str, str]:
                 "Configuration value 'testenv.maas_version' must be a quoted "
                 'string (for example "3.7") to avoid YAML numeric coercion.'
             )
-        if not isinstance(value, str):
+        if key in {"maas_vm_cpus"}:
+            if not isinstance(value, int):
+                raise click.ClickException(
+                    f"Configuration value 'testenv.{key}' must be an integer."
+                )
+        elif key in {"maas_vm_ip"}:
+            if not isinstance(value, str):
+                raise click.ClickException(
+                    f"Configuration value 'testenv.{key}' must be a string or null."
+                )
+        elif not isinstance(value, str):
             raise click.ClickException(
                 f"Configuration value 'testenv.{key}' must be a string."
             )

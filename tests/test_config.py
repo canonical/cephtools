@@ -66,15 +66,19 @@ def test_load_testenv_defaults_overrides_from_config(state_home: Path) -> None:
 
     defaults = config.load_testenv_defaults()
 
-    assert defaults == {
-        "maas_version": "3.8",
-        "admin": "admin",
-        "admin_pw": "secret",
-        "admin_mail": "ops@example.com",
-        "lxdbridge": "br0",
-        "vmhost": "lab-host",
-        "maas_tag": "custom-tag",
-    }
+    expected = config.DEFAULT_TESTENV_DEFAULTS.copy()
+    expected.update(
+        {
+            "maas_version": "3.8",
+            "admin": "admin",
+            "admin_pw": "secret",
+            "admin_mail": "ops@example.com",
+            "lxdbridge": "br0",
+            "vmhost": "lab-host",
+            "maas_tag": "custom-tag",
+        }
+    )
+    assert defaults == expected
 
 
 def test_load_testenv_defaults_rejects_legacy_maas_ch(state_home: Path) -> None:
