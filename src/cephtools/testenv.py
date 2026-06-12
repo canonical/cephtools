@@ -561,6 +561,10 @@ def ensure_lxd_host_network(name: str, *, ipv4_address: str | None = None) -> No
         ("ipv6.dhcp", "false"),
     ):
         run(["lxc", "network", "set", name, f"{key}={value}"])
+    # Host-mode setup used raw.dnsmasq=port=0 to disable dnsmasq on MAAS-owned
+    # bridges.  When a bridge is restored to host ownership, clear that override
+    # so LXD's managed DNS can listen again.
+    run(["lxc", "network", "unset", name, "raw.dnsmasq"])
 
 
 def ensure_lxd_default_profile_network(name: str) -> None:

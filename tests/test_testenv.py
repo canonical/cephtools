@@ -665,6 +665,31 @@ def test_ensure_lxd_host_network_creates_with_dns_and_dhcp(monkeypatch):
         ["lxc", "network", "set", "lxdbr0", "dns.mode=managed"],
         ["lxc", "network", "set", "lxdbr0", "ipv4.dhcp=true"],
         ["lxc", "network", "set", "lxdbr0", "ipv6.dhcp=false"],
+        ["lxc", "network", "unset", "lxdbr0", "raw.dnsmasq"],
+    ]
+
+
+def test_ensure_lxd_host_network_clears_stale_dnsmasq_override(monkeypatch):
+    commands: list[object] = []
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        commands.append(cmd)
+
+        class Result:
+            stdout = json.dumps(["/1.0/networks/lxdbr0"])
+
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    testenv.ensure_lxd_host_network("lxdbr0")
+
+    assert commands == [
+        "lxc query /1.0/networks",
+        ["lxc", "network", "set", "lxdbr0", "dns.mode=managed"],
+        ["lxc", "network", "set", "lxdbr0", "ipv4.dhcp=true"],
+        ["lxc", "network", "set", "lxdbr0", "ipv6.dhcp=false"],
+        ["lxc", "network", "unset", "lxdbr0", "raw.dnsmasq"],
     ]
 
 
