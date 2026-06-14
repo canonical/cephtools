@@ -382,6 +382,16 @@ def test_build_deploy_script() -> None:
     assert script.strip().endswith("cephtools testenv install")
 
 
+def test_build_deploy_script_includes_testenv_args() -> None:
+    script = build_deploy_script("--maas-mode vm")
+    assert script.strip().endswith("cephtools testenv --maas-mode vm install")
+
+
+def test_build_deploy_script_quotes_testenv_args() -> None:
+    script = build_deploy_script("--maas-vm-memory '16 GiB'")
+    assert "cephtools testenv --maas-vm-memory '16 GiB' install" in script
+
+
 def test_perform_remote_deploy_invokes_ssh() -> None:
     calls: list[tuple[list[str], dict[str, Any]]] = []
 

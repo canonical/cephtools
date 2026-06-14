@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import json
+import shlex
 import subprocess
 import uuid
 from collections import deque
@@ -555,7 +556,23 @@ def print_reservation_summary(
     echo(f"Cancel early with: {testflinger_bin} cancel {details.job_id}")
 
 
-def build_deploy_script() -> str:
+def _normalise_testenv_args(testenv_args: str | None) -> str:
+    if not testenv_args or not testenv_args.strip():
+        return ""
+    try:
+        parts = shlex.split(testenv_args)
+    except ValueError as exc:
+        raise click.ClickException(f"Invalid --testenv-args: {exc}") from exc
+    return " ".join(shlex.quote(part) for part in parts)
+
+
+def build_deploy_script(testenv_args: str | None = None) -> str:
+    quoted_args = _normalise_testenv_args(testenv_args)
+    install_command = (
+        f"cephtools testenv {quoted_args} install"
+        if quoted_args
+        else "cephtools testenv install"
+    )
     return "\n".join(
         [
             "set -euxo pipefail",
@@ -566,7 +583,7 @@ def build_deploy_script() -> str:
             "cd cephtools/",
             "uv pip install --system --prefix ~/.local .",
             'export PATH="$PATH:$HOME/.local/bin"',
-            "cephtools testenv install",
+            install_command,
             "",
         ]
     )
@@ -711,6 +728,15 @@ def reserve(  # pragma: no cover - exercised via click integration tests
     show_default=True,
     help="Path to the testflinger CLI binary.",
 )
+@click.option(
+    "--testenv-args",
+    envvar="CEPHTOOLS_TESTENV_ARGS",
+    default="",
+    help=(
+        "Additional arguments passed to remote 'cephtools testenv ... install'. "
+        "Can also be set with CEPHTOOLS_TESTENV_ARGS."
+    ),
+)
 def deploy(  # pragma: no cover - exercised via click integration tests
     queue_name: str,
     reserve_for: int,
@@ -719,6 +745,7 @@ def deploy(  # pragma: no cover - exercised via click integration tests
     job_tag: str | None,
     mattermost_name: str | None,
     testflinger_bin: str,
+    testenv_args: str,
 ) -> None:
     """Reserve a queue and install cephtools + testenv on it."""
     if reserve_for <= 0:
@@ -750,7 +777,7 @@ def deploy(  # pragma: no cover - exercised via click integration tests
 
     click.echo("")
     click.echo("Configuring remote environment for testenv deployment.")
-    script = build_deploy_script()
+    script = build_deploy_script(testenv_args)
     try:
         perform_remote_deploy(
             details=details,

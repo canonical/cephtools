@@ -63,13 +63,16 @@ Reserve a machine and automatically deploy `cephtools` and its test environment 
 ```bash
 cephtools testflinger deploy [QUEUE_NAME] \
     --launchpad-account <ssh-key-ref> \
-    --reserve-for <seconds>
+    --reserve-for <seconds> \
+    --testenv-args "--maas-mode vm"
 ```
 
 This command:
 1. Reserves a node on the specified queue.
 2. SSHs into the node once active.
 3. Installs `cephtools` and dependencies (LXD, MAAS, Juju, etc.) via `cephtools testenv install`.
+
+Set `--testenv-args` (or `CEPHTOOLS_TESTENV_ARGS`) to pass additional arguments to the remote `cephtools testenv ... install` command.
 
 Once complete, it provides the SSH command to access the ready-to-use test environment.
 
