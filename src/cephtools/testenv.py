@@ -218,9 +218,7 @@ def _terragrunt_vm_hostnames(terragrunt_dir: Path) -> list[str]:
     return [str(hostname) for hostname in hostnames]
 
 
-def _ensure_maas_tag(
-    admin: str, tag: str, *, maas_vm_name: str | None = None
-) -> None:
+def _ensure_maas_tag(admin: str, tag: str, *, maas_vm_name: str | None = None) -> None:
     result = _run_maas_cli(
         f"maas {shlex.quote(admin)} tags read",
         maas_vm_name=maas_vm_name,
@@ -634,21 +632,61 @@ def _profile_devices(project: str) -> dict[str, object]:
     profile = json.loads(result.stdout or "{}")
     devices = profile.get("devices")
     if not isinstance(devices, dict):
-        raise click.ClickException(f"LXD project {project!r} default profile has unexpected devices data.")
+        raise click.ClickException(
+            f"LXD project {project!r} default profile has unexpected devices data."
+        )
     return devices
 
 
-def _ensure_profile_device(project: str, device: str, device_type: str, settings: dict[str, str]) -> None:
+def _ensure_profile_device(
+    project: str, device: str, device_type: str, settings: dict[str, str]
+) -> None:
     devices = _profile_devices(project)
     existing = devices.get(device)
     if isinstance(existing, dict) and existing.get("type") == device_type:
         args = [f"{key}={value}" for key, value in settings.items()]
-        run(["lxc", "profile", "device", "set", "default", device, *args, "--project", project])
+        run(
+            [
+                "lxc",
+                "profile",
+                "device",
+                "set",
+                "default",
+                device,
+                *args,
+                "--project",
+                project,
+            ]
+        )
         return
     if device in devices:
-        run(["lxc", "profile", "device", "remove", "default", device, "--project", project])
+        run(
+            [
+                "lxc",
+                "profile",
+                "device",
+                "remove",
+                "default",
+                device,
+                "--project",
+                project,
+            ]
+        )
     args = [f"{key}={value}" for key, value in settings.items()]
-    run(["lxc", "profile", "device", "add", "default", device, device_type, *args, "--project", project])
+    run(
+        [
+            "lxc",
+            "profile",
+            "device",
+            "add",
+            "default",
+            device,
+            device_type,
+            *args,
+            "--project",
+            project,
+        ]
+    )
 
 
 def ensure_lxd_maas_project(project: str, network_name: str) -> None:
@@ -660,6 +698,7 @@ def ensure_lxd_maas_project(project: str, network_name: str) -> None:
                 "project",
                 "create",
                 project,
+                "--debug",
                 "-c",
                 "features.images=false",
                 "-c",
@@ -668,7 +707,8 @@ def ensure_lxd_maas_project(project: str, network_name: str) -> None:
                 "features.profiles=true",
                 "-c",
                 "features.storage.volumes=true",
-            ]
+            ],
+            capture=False,
         )
     storage_pool = _default_lxd_storage_pool()
     _ensure_profile_device(
@@ -783,8 +823,43 @@ def _run_lxd_minimal_init() -> None:
             raise
 
 
+def _wait_for_lxd_daemon_responsive(
+    *, timeout: float = 180, interval: float = 3
+) -> None:
+    """Ensure the LXD daemon is responsive before issuing further ``lxc`` calls.
+
+    ``snap set lxd daemon.user.group=adm`` restarts the LXD daemon
+    asynchronously with unpredictable timing: the ``snap set`` returns
+    immediately and the restart can land tens of seconds later, causing a
+    later ``lxc`` command to block indefinitely on a mid-restart socket
+    (observed as reproducible hangs at varying ``lxc`` calls during install).
+
+    Force a synchronous restart of the daemon service and then poll
+    ``lxc query /1.0`` until the API responds, with a bounded timeout so a
+    genuinely-dead daemon surfaces a failure quickly instead of stalling
+    until the job's output timeout.
+    """
+    # check=False: the service may already be restarting from the snap set.
+    run(
+        ["sudo", "systemctl", "restart", "snap.lxd.daemon.service"],
+        check=False,
+    )
+    lxd_ready()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            run(["lxc", "query", "/1.0"], check=True, quiet=True)
+            return
+        except subprocess.CalledProcessError:
+            time.sleep(interval)
+    # Final probe raises on failure so the failure is visible instead of
+    # silently proceeding into commands that will hang.
+    run(["lxc", "query", "/1.0"], check=True)
+
+
 def _configure_lxd_common(admin_pw: str) -> None:
     run("sudo snap set lxd daemon.user.group=adm")
+    _wait_for_lxd_daemon_responsive()
     _run_lxd_minimal_init()
     run(["lxc", "config", "set", "core.https_address", ":8443"])
     run(["lxc", "config", "set", "core.trust_password", admin_pw])
@@ -1285,9 +1360,7 @@ def _run_maas_cli(
     shell: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     if maas_vm_name:
-        return _run_in_lxd_instance(
-            maas_vm_name, command, check=check, quiet=quiet
-        )
+        return _run_in_lxd_instance(maas_vm_name, command, check=check, quiet=quiet)
     return run(command, check=check, quiet=quiet, shell=shell)
 
 
@@ -1300,9 +1373,7 @@ def _run_maas_apikey(
 ) -> subprocess.CompletedProcess[str]:
     command = f"maas apikey --username {shlex.quote(admin)}"
     if maas_vm_name:
-        return _run_in_lxd_instance(
-            maas_vm_name, command, check=check, quiet=quiet
-        )
+        return _run_in_lxd_instance(maas_vm_name, command, check=check, quiet=quiet)
     return run(f"sudo {command}", check=check, quiet=quiet)
 
 
@@ -1469,9 +1540,7 @@ def extract_arches(resources):
 
 def import_boot_resources(admin, *, maas_vm_name: str | None = None):
     """Import images, wait for them to become available."""
-    _run_maas_cli(
-        f'maas "{admin}" boot-resources import', maas_vm_name=maas_vm_name
-    )
+    _run_maas_cli(f'maas "{admin}" boot-resources import', maas_vm_name=maas_vm_name)
     time.sleep(15)
     # read boot and loop until we have the required architecture
     for _ in range(120):
@@ -1550,9 +1619,7 @@ def maas_subnet_ids(admin, cidr, *, maas_vm_name: str | None = None):
     return sid, fabric_id, vlan_id, rack_sysid
 
 
-def update_subnet_gateway(
-    admin, subnet_id, gw, *, maas_vm_name: str | None = None
-):
+def update_subnet_gateway(admin, subnet_id, gw, *, maas_vm_name: str | None = None):
     _run_maas_cli(
         f"maas {shlex.quote(admin)} subnet update {subnet_id} gateway_ip={gw}",
         maas_vm_name=maas_vm_name,
@@ -1886,7 +1953,11 @@ def _create_nodes_impl(
     if vm_count <= 0:
         raise click.ClickException("--vm-count must be a positive integer.")
 
-    maas_vm_name = ctx_obj.get("maas_vm_name") if ctx_obj.get("maas_mode") == MAAS_MODE_VM else None
+    maas_vm_name = (
+        ctx_obj.get("maas_vm_name")
+        if ctx_obj.get("maas_mode") == MAAS_MODE_VM
+        else None
+    )
     _get_lxd_vm_host_id(
         ctx_obj["admin"], ctx_obj["vmhost"], maas_vm_name=maas_vm_name
     )  # ensure host exists
@@ -1994,7 +2065,6 @@ def _destroy_nodes_impl() -> None:
 
 def _terragrunt_dir_not_found_detail(detail: str) -> bool:
     return "Unable to locate terragrunt configuration directory." in detail
-
 
 
 def _cleanup_destroy_nodes(*, dry_run: bool = False) -> CleanupPhaseResult:
@@ -2300,7 +2370,6 @@ def _installed_apt_packages(
     return sorted(matches)
 
 
-
 def _cleanup_remove_snap(name: str, *, dry_run: bool = False) -> CleanupPhaseResult:
     phase = f"remove snap {name}"
     if dry_run:
@@ -2319,7 +2388,6 @@ def _cleanup_remove_snap(name: str, *, dry_run: bool = False) -> CleanupPhaseRes
         return CleanupPhaseResult(phase, "failed", _format_process_error(exc))
 
     return CleanupPhaseResult(phase, "ok", f"removed snap {name}")
-
 
 
 def _cleanup_remove_user_paths(
@@ -2350,7 +2418,6 @@ def _cleanup_remove_user_paths(
     return CleanupPhaseResult(phase, "ok", f"removed {', '.join(removed)}")
 
 
-
 def _root_path_exists(path: str) -> bool:
     result = run(["sudo", "test", "-e", path], check=False, quiet=True)
     if result.returncode == 0:
@@ -2358,7 +2425,6 @@ def _root_path_exists(path: str) -> bool:
     if result.returncode == 1:
         return False
     raise click.ClickException(_format_process_error(result))
-
 
 
 def _cleanup_remove_root_paths(
@@ -2387,7 +2453,6 @@ def _cleanup_remove_root_paths(
     return CleanupPhaseResult(phase, "ok", f"removed {', '.join(existing)}")
 
 
-
 def _cleanup_purge_apt_packages(
     phase: str,
     *,
@@ -2401,7 +2466,9 @@ def _cleanup_purge_apt_packages(
         return CleanupPhaseResult(phase, "failed", str(exc))
 
     if not packages:
-        return CleanupPhaseResult(phase, "skipped", "No matching apt packages installed")
+        return CleanupPhaseResult(
+            phase, "skipped", "No matching apt packages installed"
+        )
 
     if dry_run:
         rendered = ", ".join(packages)
@@ -2425,7 +2492,6 @@ def _cleanup_purge_apt_packages(
     return CleanupPhaseResult(phase, "ok", f"purged {', '.join(packages)}")
 
 
-
 def _maas_ppa_source_paths() -> list[Path]:
     sources_dir = Path("/etc/apt/sources.list.d")
     if not sources_dir.exists():
@@ -2445,7 +2511,6 @@ def _maas_ppa_source_paths() -> list[Path]:
     return matches
 
 
-
 def _cleanup_remove_maas_ppa_sources(*, dry_run: bool = False) -> CleanupPhaseResult:
     phase = "remove MAAS apt sources"
     paths = _maas_ppa_source_paths()
@@ -2462,7 +2527,6 @@ def _cleanup_remove_maas_ppa_sources(*, dry_run: bool = False) -> CleanupPhaseRe
         return CleanupPhaseResult(phase, "failed", _format_process_error(exc))
 
     return CleanupPhaseResult(phase, "ok", f"removed {rendered}")
-
 
 
 def _cleanup_apt_autoremove(*, dry_run: bool = False) -> CleanupPhaseResult:
@@ -2492,7 +2556,6 @@ def _cleanup_apt_autoremove(*, dry_run: bool = False) -> CleanupPhaseResult:
     return CleanupPhaseResult(phase, "ok", "completed apt autoremove --purge")
 
 
-
 def _cleanup_apt_update(*, dry_run: bool = False) -> CleanupPhaseResult:
     phase = "apt update"
     if dry_run:
@@ -2504,7 +2567,6 @@ def _cleanup_apt_update(*, dry_run: bool = False) -> CleanupPhaseResult:
         return CleanupPhaseResult(phase, "failed", _format_process_error(exc))
 
     return CleanupPhaseResult(phase, "ok", "updated apt package lists")
-
 
 
 def _cleanup_restore_systemd_timesyncd(*, dry_run: bool = False) -> CleanupPhaseResult:
@@ -2541,7 +2603,6 @@ def _cleanup_restore_systemd_timesyncd(*, dry_run: bool = False) -> CleanupPhase
     if installed:
         return CleanupPhaseResult(phase, "ok", "enabled systemd-timesyncd")
     return CleanupPhaseResult(phase, "ok", "installed and enabled systemd-timesyncd")
-
 
 
 def _emit_cleanup_summary(results: list[CleanupPhaseResult]) -> None:
@@ -2878,7 +2939,9 @@ def configure_network(ctx):
         ctx.obj["admin"], fabric_id, vlan_id, rack_sysid, maas_vm_name=maas_vm_name
     )
     click.echo(f"network configured on {bridge} ({cidr}, gw {gw}).")
-    space_id = create_space(ctx.obj["admin"], JUJU_SPACE_NAME, maas_vm_name=maas_vm_name)
+    space_id = create_space(
+        ctx.obj["admin"], JUJU_SPACE_NAME, maas_vm_name=maas_vm_name
+    )
     assign_space_to_vlan(
         ctx.obj["admin"], fabric_id, vlan_id, space_id, maas_vm_name=maas_vm_name
     )
@@ -2894,7 +2957,9 @@ def configure_network(ctx):
             ctx.obj["admin"], ext_sid, ext_cidr
         )
         enable_vlan_dhcp(ctx.obj["admin"], ext_fabric_id, ext_vlan_id, ext_rack_sysid)
-        click.echo(f"network configured on {EXT_LXD_NETWORK} ({ext_cidr}, gw {ext_gw}).")
+        click.echo(
+            f"network configured on {EXT_LXD_NETWORK} ({ext_cidr}, gw {ext_gw})."
+        )
         ext_space_id = create_space(ctx.obj["admin"], EXTERNAL_SPACE_NAME)
         assign_space_to_vlan(ctx.obj["admin"], ext_fabric_id, ext_vlan_id, ext_space_id)
         click.echo(
@@ -3257,9 +3322,7 @@ def cleanup(
                 _cleanup_remove_maas_ppa_sources(dry_run=True)
                 if dry_run
                 else _cleanup_remove_maas_ppa_sources(),
-                _cleanup_apt_update(dry_run=True)
-                if dry_run
-                else _cleanup_apt_update(),
+                _cleanup_apt_update(dry_run=True) if dry_run else _cleanup_apt_update(),
                 _cleanup_restore_systemd_timesyncd(dry_run=True)
                 if dry_run
                 else _cleanup_restore_systemd_timesyncd(),

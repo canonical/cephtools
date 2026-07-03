@@ -361,16 +361,23 @@ def test_lxd_init_impl_stops_and_restarts_bind9(monkeypatch):
     assert commands[0] == (["sudo", "systemctl", "stop", "bind9"], False, False)
     assert commands[1] == ("sudo snap set lxd daemon.user.group=adm", True, False)
     assert commands[2] == (
+        ["sudo", "systemctl", "restart", "snap.lxd.daemon.service"],
+        False,
+        False,
+    )
+    assert commands[3] == ("sudo lxd waitready", True, False)
+    assert commands[4] == (["lxc", "query", "/1.0"], True, False)
+    assert commands[5] == (
         ["lxc", "config", "set", "core.https_address", ":8443"],
         True,
         False,
     )
-    assert commands[3] == (
+    assert commands[6] == (
         ["lxc", "config", "set", "core.trust_password", "secret"],
         True,
         False,
     )
-    assert commands[4] == (["sudo", "systemctl", "start", "bind9"], False, False)
+    assert commands[7] == (["sudo", "systemctl", "start", "bind9"], False, False)
     assert waited == [True]
     assert init_calls == [True]
     assert ensured_networks == ["lxdbr0", testenv.EXT_LXD_NETWORK]
@@ -712,7 +719,9 @@ def test_lxd_init_vm_impl_does_not_touch_bind9(monkeypatch):
     calls: list[tuple[str, object]] = []
 
     monkeypatch.setattr(
-        testenv, "_configure_lxd_common", lambda admin_pw: calls.append(("common", admin_pw))
+        testenv,
+        "_configure_lxd_common",
+        lambda admin_pw: calls.append(("common", admin_pw)),
     )
     monkeypatch.setattr(
         testenv,
@@ -734,7 +743,9 @@ def test_lxd_init_vm_impl_does_not_touch_bind9(monkeypatch):
         "ensure_lxd_maas_project",
         lambda project, network: calls.append(("project", (project, network))),
     )
-    monkeypatch.setattr(testenv.time, "sleep", lambda seconds: calls.append(("sleep", seconds)))
+    monkeypatch.setattr(
+        testenv.time, "sleep", lambda seconds: calls.append(("sleep", seconds))
+    )
 
     testenv.lxd_init_vm_impl("secret", "lxdbr0", "maasbr0", "maas")
 
@@ -1454,7 +1465,6 @@ def test_cleanup_destroy_nodes_skips_missing_inputs(
     assert "ensure-nodes.hcl" in result.detail
 
 
-
 def test_cleanup_destroy_nodes_skips_missing_terragrunt_dir(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1471,7 +1481,6 @@ def test_cleanup_destroy_nodes_skips_missing_terragrunt_dir(
 
     assert result.outcome == "skipped"
     assert "no Terragrunt-managed nodes to destroy" in result.detail
-
 
 
 def test_cleanup_kill_controller_when_present(
@@ -1691,7 +1700,6 @@ def test_cleanup_remove_terragrunt_inputs_skips_missing(
     assert result.outcome == "skipped"
 
 
-
 def test_cleanup_remove_terragrunt_inputs_skips_missing_terragrunt_dir(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1708,7 +1716,6 @@ def test_cleanup_remove_terragrunt_inputs_skips_missing_terragrunt_dir(
 
     assert result.outcome == "skipped"
     assert "no Terragrunt inputs to remove" in result.detail
-
 
 
 def test_cleanup_cli_dry_run_does_not_invoke_run(
@@ -1895,7 +1902,6 @@ def test_cleanup_cli_best_effort_reports_failures(
     )
 
 
-
 def test_cleanup_cli_purge_installed_rejects_keep_flags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1910,7 +1916,6 @@ def test_cleanup_cli_purge_installed_rejects_keep_flags(
     assert result.exit_code == 1
     assert "--purge-installed cannot be combined" in result.output
     assert "--keep-state" in result.output
-
 
 
 def test_cleanup_cli_purge_installed_runs_extended_phases(
@@ -1998,9 +2003,7 @@ def test_cleanup_cli_purge_installed_runs_extended_phases(
         testenv,
         "_cleanup_restore_systemd_timesyncd",
         lambda: calls.append("timesyncd")
-        or testenv.CleanupPhaseResult(
-            "restore systemd-timesyncd", "ok", "removed"
-        ),
+        or testenv.CleanupPhaseResult("restore systemd-timesyncd", "ok", "removed"),
     )
     monkeypatch.setattr(
         testenv,
@@ -2035,11 +2038,12 @@ def test_cleanup_cli_purge_installed_runs_extended_phases(
     ]
 
 
-
 def test_cleanup_kill_controller_skips_when_juju_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(testenv.shutil, "which", lambda name: None if name == "juju" else "/bin/true")
+    monkeypatch.setattr(
+        testenv.shutil, "which", lambda name: None if name == "juju" else "/bin/true"
+    )
 
     result = testenv._cleanup_kill_controller("maas-controller")
 
@@ -2047,11 +2051,12 @@ def test_cleanup_kill_controller_skips_when_juju_missing(
     assert result.detail == "juju command not found"
 
 
-
 def test_cleanup_delete_vm_host_skips_when_maas_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(testenv.shutil, "which", lambda name: None if name == "maas" else "/bin/true")
+    monkeypatch.setattr(
+        testenv.shutil, "which", lambda name: None if name == "maas" else "/bin/true"
+    )
 
     result = testenv._cleanup_delete_vm_host("admin", "local-lxd")
 
@@ -2059,17 +2064,17 @@ def test_cleanup_delete_vm_host_skips_when_maas_missing(
     assert result.detail == "maas command not found"
 
 
-
 def test_cleanup_delete_known_lxd_instances_skips_when_lxc_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(testenv.shutil, "which", lambda name: None if name == "lxc" else "/bin/true")
+    monkeypatch.setattr(
+        testenv.shutil, "which", lambda name: None if name == "lxc" else "/bin/true"
+    )
 
     result = testenv._cleanup_delete_known_lxd_instances()
 
     assert result.outcome == "skipped"
     assert result.detail == "lxc command not found"
-
 
 
 def test_cleanup_cli_purge_installed_removes_terragrunt_inputs_after_node_failure(
@@ -2102,7 +2107,9 @@ def test_cleanup_cli_purge_installed_removes_terragrunt_inputs_after_node_failur
     monkeypatch.setattr(
         testenv,
         "_cleanup_delete_known_lxd_instances",
-        lambda: testenv.CleanupPhaseResult("delete known LXD instances", "ok", "removed"),
+        lambda: testenv.CleanupPhaseResult(
+            "delete known LXD instances", "ok", "removed"
+        ),
     )
     monkeypatch.setattr(
         testenv,
