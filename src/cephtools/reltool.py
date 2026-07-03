@@ -16,7 +16,9 @@ def download_and_get_ts(charm, channel, base, verbose=False):
     # download charm into that dir, silently
     dest = tempfile.NamedTemporaryFile(suffix=".charm", delete=False, dir=juju_tmp).name
     if verbose:
-        click.echo(f"Downloading {charm} from channel {channel} (base {base}) to {dest}")
+        click.echo(
+            f"Downloading {charm} from channel {channel} (base {base}) to {dest}"
+        )
     subprocess.check_call(
         [
             "juju",
@@ -43,7 +45,9 @@ def download_and_get_ts(charm, channel, base, verbose=False):
                         ts = line.split(":", 1)[1].strip()
                         parsed = datetime.fromisoformat(ts)
                         if verbose:
-                            click.echo(f"  commit_date for {charm} ({channel}): {parsed}")
+                            click.echo(
+                                f"  commit_date for {charm} ({channel}): {parsed}"
+                            )
                         return parsed
         raise RuntimeError("commit_date not found in git-info.txt")
     finally:
@@ -89,7 +93,9 @@ def get_prs(gh_base, charm_name, start_ts, end_ts, repo_path, verbose=False):
     prs = run_gh_pr_list(gh_base, repo_path)
     if verbose:
         click.echo(f"Found {len(prs)} closed PRs on base {gh_base}")
-        click.echo(f"Filtering PRs between {start_ts} and {end_ts} touching {charm_name}/")
+        click.echo(
+            f"Filtering PRs between {start_ts} and {end_ts} touching {charm_name}/"
+        )
 
     def parse(ts):
         return datetime.fromisoformat(ts)
@@ -113,7 +119,9 @@ def get_prs(gh_base, charm_name, start_ts, end_ts, repo_path, verbose=False):
 @click.argument("base")
 @click.argument("base_branch")
 @click.option("--repo", default=".", help="Path to the git repository for the charms.")
-@click.option("--verbose", is_flag=True, default=False, help="Print diagnostic information.")
+@click.option(
+    "--verbose", is_flag=True, default=False, help="Print diagnostic information."
+)
 def list_prs(charm, source, target, base, base_branch, repo, verbose):
     """A tool to list PRs for a given charm between releases."""
     src_ts = download_and_get_ts(charm, source, base, verbose=verbose)
@@ -136,7 +144,9 @@ def list_prs(charm, source, target, base, base_branch, repo, verbose):
     default=False,
     help="Apply the release. If not present, a dry-run is performed.",
 )
-@click.option("--verbose", is_flag=True, default=False, help="Print diagnostic information.")
+@click.option(
+    "--verbose", is_flag=True, default=False, help="Print diagnostic information."
+)
 def charm_rel(source, target, base, charms, apply, verbose):
     """Release charm revisions from a source channel to a target channel."""
     for charm in charms:
@@ -167,12 +177,16 @@ def charm_rel(source, target, base, charms, apply, verbose):
                     for release in mapping.get("releases", []):
                         rel_channel = release.get("channel")
                         if verbose:
-                            click.echo(f"    release channel={rel_channel!r} rev={release.get('revision')} (want {source!r})")
+                            click.echo(
+                                f"    release channel={rel_channel!r} rev={release.get('revision')} (want {source!r})"
+                            )
                         if rel_channel == source:
                             revisions.append(str(release["revision"]))
 
         if verbose:
-            click.echo(f"  Found revisions for base {base}, source {source}: {revisions}")
+            click.echo(
+                f"  Found revisions for base {base}, source {source}: {revisions}"
+            )
 
         for revision in revisions:
             if apply:
