@@ -21,15 +21,42 @@ def run(
     check: bool = True,
     shell: bool = False,
     quiet: bool = False,
+    capture: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     """
     Execute a command and return the completed process.
 
     The helper normalises different command formats and consistently captures
-    stdout for downstream parsing.
+    stdout for downstream parsing. When ``capture=False`` the child's stdout and
+    stderr stream directly to this process's stdout/stderr (useful for
+    debugging a hung command with ``--debug``) and stdin is closed (DEVNULL) so
+    the child can never block waiting on an inherited stdin prompt.
     """
     if not quiet:
         print(f"+ {_format_command(command)}")
+
+    if not capture:
+        if shell:
+            if not isinstance(command, str):
+                command = " ".join(str(part) for part in command)
+            return subprocess.run(
+                command,
+                check=check,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                shell=True,
+            )
+        if isinstance(command, str):
+            command = shlex.split(command)
+        else:
+            command = [str(part) for part in command]
+        return subprocess.run(
+            command,
+            check=check,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            shell=False,
+        )
 
     if shell:
         if not isinstance(command, str):
@@ -40,6 +67,7 @@ def run(
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
             shell=True,
         )
 
@@ -54,6 +82,7 @@ def run(
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
         shell=False,
     )
 

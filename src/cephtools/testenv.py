@@ -698,6 +698,7 @@ def ensure_lxd_maas_project(project: str, network_name: str) -> None:
                 "project",
                 "create",
                 project,
+                "--debug",
                 "-c",
                 "features.images=false",
                 "-c",
@@ -706,7 +707,8 @@ def ensure_lxd_maas_project(project: str, network_name: str) -> None:
                 "features.profiles=true",
                 "-c",
                 "features.storage.volumes=true",
-            ]
+            ],
+            capture=False,
         )
     storage_pool = _default_lxd_storage_pool()
     _ensure_profile_device(
