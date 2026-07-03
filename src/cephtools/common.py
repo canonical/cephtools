@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+import sys
 from collections.abc import Sequence
 from typing import Union
 
@@ -31,6 +32,10 @@ def run(
     stderr stream directly to this process's stdout/stderr (useful for
     debugging a hung command with ``--debug``) and stdin is closed (DEVNULL) so
     the child can never block waiting on an inherited stdin prompt.
+
+    On failure the captured stdout/stderr are printed to stderr before
+    re-raising so the actual command error is visible (by default
+    ``subprocess.run`` swallows captured output inside the exception object).
     """
     if not quiet:
         print(f"+ {_format_command(command)}")
@@ -61,6 +66,12 @@ def run(
     if shell:
         if not isinstance(command, str):
             command = " ".join(str(part) for part in command)
+    elif isinstance(command, str):
+        command = shlex.split(command)
+    else:
+        command = [str(part) for part in command]
+
+    try:
         return subprocess.run(
             command,
             check=check,
@@ -68,23 +79,14 @@ def run(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
-            shell=True,
+            shell=shell,
         )
-
-    if isinstance(command, str):
-        command = shlex.split(command)
-    else:
-        command = [str(part) for part in command]
-
-    return subprocess.run(
-        command,
-        check=check,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        stdin=subprocess.DEVNULL,
-        shell=False,
-    )
+    except subprocess.CalledProcessError as exc:
+        if exc.stdout:
+            print(exc.stdout, end="", file=sys.stderr)
+        if exc.stderr:
+            print(exc.stderr, end="", file=sys.stderr)
+        raise
 
 
 def ensure_snap(
