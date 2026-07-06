@@ -20,6 +20,14 @@ from cephtools.config import (
     load_cephtools_config,
     load_testenv_defaults,
 )
+from cephtools.progress import (
+    emit,
+    checkpoint,
+    install_fault_handlers,
+    mark_complete,
+    mark_failed,
+    operation,
+)
 from cephtools.state import get_state_file
 from cephtools.terraform import ensure_terragrunt, terraform_root_candidates
 from cephtools.testflinger import (
@@ -746,10 +754,19 @@ def _wait_for_bind9_shutdown(
 ) -> None:
     deadline = time.monotonic() + timeout
     active_states = {"active", "activating", "reloading", "deactivating"}
+    attempt = 0
 
     while True:
-        if _bind9_service_state() not in active_states and not _bind9_named_processes():
+        attempt += 1
+        state = _bind9_service_state()
+        procs = _bind9_named_processes()
+        if state not in active_states and not procs:
             return
+        remaining = max(0, int(deadline - time.monotonic()))
+        emit(
+            f"wait_for_bind9_shutdown: attempt {attempt}, state={state}, "
+            f"named_procs={len(procs)}, {remaining}s remaining"
+        )
         if time.monotonic() >= deadline:
             click.echo(
                 "Timed out waiting for bind9 to stop cleanly; continuing and collecting diagnostics if LXD init fails."
@@ -846,12 +863,20 @@ def _wait_for_lxd_daemon_responsive(
     )
     lxd_ready()
     deadline = time.monotonic() + timeout
+    attempt = 0
     while time.monotonic() < deadline:
+        attempt += 1
         try:
             run(["lxc", "query", "/1.0"], check=True, quiet=True)
             return
-        except subprocess.CalledProcessError:
+        except subprocess.CalledProcessError as exc:
+            remaining = max(0, int(deadline - time.monotonic()))
+            emit(
+                f"wait_for_lxd_daemon: attempt {attempt} not responsive "
+                f"(exit {exc.returncode}), {remaining}s remaining"
+            )
             time.sleep(interval)
+    emit("wait_for_lxd_daemon: timed out, final probe (will raise on failure)")
     # Final probe raises on failure so the failure is visible instead of
     # silently proceeding into commands that will hang.
     run(["lxc", "query", "/1.0"], check=True)
@@ -930,14 +955,20 @@ def lxd_warmup():
 
         deadline = time.monotonic() + 300  # 5 minutes max
         success = False
+        attempt = 0
         while time.monotonic() < deadline:
+            attempt += 1
             time.sleep(10)
             try:
                 run(f"lxc exec {vm_name} -- apt-get update", check=True)
                 success = True
                 break
             except subprocess.CalledProcessError:
-                click.echo("Warmup VM not ready yet, retrying...")
+                remaining = max(0, int(deadline - time.monotonic()))
+                emit(
+                    f"lxd_warmup: attempt {attempt} not ready, "
+                    f"{remaining}s remaining"
+                )
 
         if not success:
             click.echo("Warning: Warmup apt-get update timed out.")
@@ -1105,7 +1136,9 @@ def ensure_maas_vm(
 def wait_for_lxd_vm_cloud_init(vm_name: str, *, timeout: int = 900) -> None:
     deadline = time.monotonic() + timeout
     last_error = ""
+    attempt = 0
     while time.monotonic() < deadline:
+        attempt += 1
         result = _run_in_lxd_instance(
             vm_name,
             "cloud-init status --wait || cloud-init status --long",
@@ -1115,6 +1148,11 @@ def wait_for_lxd_vm_cloud_init(vm_name: str, *, timeout: int = 900) -> None:
         if result.returncode == 0:
             return
         last_error = _format_process_error(result)
+        remaining = max(0, int(deadline - time.monotonic()))
+        emit(
+            f"wait_for_cloud_init[{vm_name}]: attempt {attempt} not done "
+            f"(rc={result.returncode}), {remaining}s remaining"
+        )
         time.sleep(10)
     raise click.ClickException(
         f"Timed out waiting for cloud-init in {vm_name}: {last_error}"
@@ -1135,40 +1173,45 @@ def maas_vm_init_impl(
     admin_mail: str,
     maas_version: str,
 ) -> str:
-    ensure_maas_vm(vm_name, image, cpus, memory, disk, network_name, maas_vm_ip)
-    wait_for_lxd_vm_cloud_init(vm_name)
-    _run_in_lxd_instance(
-        vm_name,
-        "netplan apply && resolvectl dns eth0 1.1.1.1 8.8.8.8 && resolvectl domain eth0 '~.'",
-    )
-    script = render_maas_vm_bootstrap_script(
-        maas_url, admin, admin_pw, admin_mail, maas_version
-    )
-    local_script = Path("/tmp") / f"{vm_name}-maas-bootstrap.sh"
-    local_script.write_text(script)
-    os.chmod(local_script, 0o700)
-    _run_in_lxd_instance(vm_name, ["rm", "-f", MAAS_VM_BOOTSTRAP_SCRIPT])
-    run(
-        [
-            "lxc",
-            "file",
-            "push",
-            "--uid",
-            "0",
-            "--gid",
-            "0",
-            "--mode",
-            "700",
-            str(local_script),
-            f"{vm_name}{MAAS_VM_BOOTSTRAP_SCRIPT}",
-        ]
-    )
-    _run_in_lxd_instance(vm_name, [MAAS_VM_BOOTSTRAP_SCRIPT])
-    api_key = _run_in_lxd_instance(
-        vm_name,
-        f"maas apikey --username {shlex.quote(admin)}",
-        quiet=True,
-    ).stdout.strip()
+    with operation("3/7", "maas-vm-init:ensure_maas_vm"):
+        ensure_maas_vm(vm_name, image, cpus, memory, disk, network_name, maas_vm_ip)
+    with operation("3/7", "maas-vm-init:wait_for_cloud_init"):
+        wait_for_lxd_vm_cloud_init(vm_name)
+    with operation("3/7", "maas-vm-init:network_setup"):
+        _run_in_lxd_instance(
+            vm_name,
+            "netplan apply && resolvectl dns eth0 1.1.1.1 8.8.8.8 && resolvectl domain eth0 '~.'",
+        )
+    with operation("3/7", "maas-vm-init:bootstrap_maas"):
+        script = render_maas_vm_bootstrap_script(
+            maas_url, admin, admin_pw, admin_mail, maas_version
+        )
+        local_script = Path("/tmp") / f"{vm_name}-maas-bootstrap.sh"
+        local_script.write_text(script)
+        os.chmod(local_script, 0o700)
+        _run_in_lxd_instance(vm_name, ["rm", "-f", MAAS_VM_BOOTSTRAP_SCRIPT])
+        run(
+            [
+                "lxc",
+                "file",
+                "push",
+                "--uid",
+                "0",
+                "--gid",
+                "0",
+                "--mode",
+                "700",
+                str(local_script),
+                f"{vm_name}{MAAS_VM_BOOTSTRAP_SCRIPT}",
+            ]
+        )
+        _run_in_lxd_instance(vm_name, [MAAS_VM_BOOTSTRAP_SCRIPT])
+    with operation("3/7", "maas-vm-init:api_key"):
+        api_key = _run_in_lxd_instance(
+            vm_name,
+            f"maas apikey --username {shlex.quote(admin)}",
+            quiet=True,
+        ).stdout.strip()
     return api_key
 
 
@@ -1387,33 +1430,39 @@ def _ensure_maas_auth_ready() -> None:
 
 
 def maas_init_impl(maas_url, admin, admin_pw, admin_mail):
-    already_initialized = _maas_is_initialized()
-    if already_initialized:
-        print(
-            "MAAS already configured; ensuring database settings, services, and admin user."
-        )
-
-    _ensure_maas_postgres(admin_pw)
-    _configure_maas_region(maas_url, admin_pw)
-    _ensure_maas_auth_ready()
-
-    if not _maas_admin_exists(admin):
-        try:
-            run(
-                [
-                    "sudo",
-                    "maas",
-                    "createadmin",
-                    "--username",
-                    admin,
-                    "--password",
-                    admin_pw,
-                    "--email",
-                    admin_mail,
-                ]
+    with operation("3/7", "maas-init:_ensure_maas_postgres"):
+        already_initialized = _maas_is_initialized()
+        if already_initialized:
+            emit(
+                "MAAS already configured; ensuring database settings, "
+                "services, and admin user."
             )
-        except subprocess.CalledProcessError as e:
-            print((e.stderr or "").strip())
+        _ensure_maas_postgres(admin_pw)
+
+    with operation("3/7", "maas-init:_configure_maas_region"):
+        _configure_maas_region(maas_url, admin_pw)
+
+    with operation("3/7", "maas-init:_ensure_maas_auth_ready"):
+        _ensure_maas_auth_ready()
+
+    with operation("3/7", "maas-init:createadmin"):
+        if not _maas_admin_exists(admin):
+            try:
+                run(
+                    [
+                        "sudo",
+                        "maas",
+                        "createadmin",
+                        "--username",
+                        admin,
+                        "--password",
+                        admin_pw,
+                        "--email",
+                        admin_mail,
+                    ]
+                )
+            except subprocess.CalledProcessError as e:
+                print((e.stderr or "").strip())
 
     time.sleep(10)
 
@@ -1543,7 +1592,7 @@ def import_boot_resources(admin, *, maas_vm_name: str | None = None):
     _run_maas_cli(f'maas "{admin}" boot-resources import', maas_vm_name=maas_vm_name)
     time.sleep(15)
     # read boot and loop until we have the required architecture
-    for _ in range(120):
+    for attempt in range(120):
         out = _run_maas_cli(
             f"maas {shlex.quote(admin)} boot-resources read",
             maas_vm_name=maas_vm_name,
@@ -1567,6 +1616,12 @@ def import_boot_resources(admin, *, maas_vm_name: str | None = None):
             raise Exception(
                 f"Boot resource {REQUIRED_BOOT_ARCHITECTURE} disappeared after import!"
             )
+        remaining = max(0, (119 - attempt) * 6)
+        emit(
+            f"import_boot_resources: attempt {attempt + 1}/120, "
+            f"synced_arches=[{', '.join(sorted(arches)) or 'none'}], "
+            f"~{remaining}s remaining"
+        )
         time.sleep(6)
     raise Exception("Failed to import boot resources")
 
@@ -1755,7 +1810,9 @@ def _wait_for_vm_host_architecture(
     """Poll until the MAAS VM host reports the required architecture."""
     deadline = time.monotonic() + timeout
     last_seen: list[str] = []
+    attempt = 0
     while time.monotonic() < deadline:
+        attempt += 1
         if maas_vm_name is None:
             architectures = _get_vm_host_architectures(admin, vmhost)
         else:
@@ -1765,6 +1822,11 @@ def _wait_for_vm_host_architecture(
         if architecture in architectures:
             return
         last_seen = architectures
+        remaining = max(0, int(deadline - time.monotonic()))
+        emit(
+            f"wait_for_vm_host_arch: attempt {attempt}, "
+            f"seen=[{', '.join(last_seen) or 'none'}], {remaining}s remaining"
+        )
         time.sleep(interval)
 
     seen_msg = ", ".join(last_seen) if last_seen else "none"
@@ -1849,7 +1911,7 @@ def _juju_controller_exists(juju: jubilant.Juju, controller_name: str) -> bool:
 
 def _wait_for_controller_ready(juju: jubilant.Juju) -> None:
     time.sleep(10)
-    for _ in range(20):
+    for attempt in range(20):
         controllers_output = juju.cli(
             "controllers",
             "--format",
@@ -1864,6 +1926,11 @@ def _wait_for_controller_ready(juju: jubilant.Juju) -> None:
         )
         if total_ctrl_machines > 0:
             return
+        remaining = max(0, (19 - attempt) * 6)
+        emit(
+            f"wait_for_controller_ready: attempt {attempt + 1}/20, "
+            f"ctrl_machines=0, ~{remaining}s remaining"
+        )
         time.sleep(6)
 
     raise click.ClickException("juju controller machines not ready after timeout")
@@ -3395,36 +3462,45 @@ def juju_init(ctx):
 @click.pass_context
 def install(ctx):
     """Run all testenv installation steps in sequence."""
-    click.echo("Starting full testenv installation...")
+    install_fault_handlers("install")
+    emit("Starting full testenv installation...")
 
     click.echo("\n=== Step 1/7: Installing dependencies ===")
-    ctx.invoke(install_deps)
+    with operation("1/7", "install-deps"):
+        ctx.invoke(install_deps)
 
     click.echo("\n=== Step 2/7: Initializing LXD ===")
-    ctx.invoke(lxd_init_cmd)
+    with operation("2/7", "lxd-init"):
+        ctx.invoke(lxd_init_cmd)
 
     click.echo("\n=== Step 3/7: Initializing MAAS ===")
-    ctx.invoke(maas_init_cmd)
+    with operation("3/7", "maas-init"):
+        ctx.invoke(maas_init_cmd)
 
     click.echo("\n=== Step 4/7: Registering VM host ===")
-    ctx.invoke(register_vm_host)
+    with operation("4/7", "register-vm-host"):
+        ctx.invoke(register_vm_host)
 
     click.echo("\n=== Step 5/7: Configuring network ===")
-    ctx.invoke(configure_network)
+    with operation("5/7", "configure-network"):
+        ctx.invoke(configure_network)
 
     click.echo("\n=== Step 6/7: Initializing Juju ===")
-    ctx.invoke(juju_init)
+    with operation("6/7", "juju-init"):
+        ctx.invoke(juju_init)
 
     click.echo("\n=== Step 7/7: Creating Juju model ===")
-    _ensure_juju_model(CEPHTOOLS_MODEL, constraint=f"tags={CEPHTOOLS_TAG}")
-    click.echo(
-        f"Juju model '{CEPHTOOLS_MODEL}' ensured with constraint tags={CEPHTOOLS_TAG}."
-    )
+    with operation("7/7", "create-model"):
+        _ensure_juju_model(CEPHTOOLS_MODEL, constraint=f"tags={CEPHTOOLS_TAG}")
+        click.echo(
+            f"Juju model '{CEPHTOOLS_MODEL}' ensured with constraint tags={CEPHTOOLS_TAG}."
+        )
 
     click.echo("\n=== Installation complete! ===")
     click.echo(f"MAAS URL: {ctx.obj['maas_url']}")
     click.echo(f"Admin user: {ctx.obj['admin']}")
     click.echo("You can now use 'juju status' to check your controller.")
+    mark_complete()
 
 
 def main():
