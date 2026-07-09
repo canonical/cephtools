@@ -450,7 +450,7 @@ def test_wait_for_bind9_shutdown_waits_for_named_exit(monkeypatch):
 
     testenv._wait_for_bind9_shutdown(timeout=5, interval=2)
 
-    assert sleeps == [2, 2]
+    assert sleeps == [2]
 
 
 def test_run_lxd_minimal_init_retries_after_failure(monkeypatch):
@@ -759,6 +759,39 @@ def test_lxd_init_vm_impl_does_not_touch_bind9(monkeypatch):
     ]
 
 
+def test_lxd_init_lxd_impl_creates_ext_as_host_network(monkeypatch):
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        testenv,
+        "_configure_lxd_common",
+        lambda admin_pw: calls.append(("common", admin_pw)),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "ensure_lxd_host_network",
+        lambda name: calls.append(("host-network", name)),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "ensure_lxd_default_profile_network",
+        lambda name: calls.append(("profile", name)),
+    )
+    monkeypatch.setattr(
+        testenv.time, "sleep", lambda seconds: calls.append(("sleep", seconds))
+    )
+
+    testenv.lxd_init_lxd_impl("secret", "lxdbr0")
+
+    assert calls == [
+        ("common", "secret"),
+        ("host-network", "lxdbr0"),
+        ("profile", "lxdbr0"),
+        ("host-network", testenv.EXT_LXD_NETWORK),
+        ("sleep", 2),
+    ]
+
+
 def test_ensure_lxd_default_profile_network_adds_eth0(monkeypatch):
     commands: list[object] = []
 
@@ -939,6 +972,181 @@ def test_dns_preflight_raises_when_unresolved(monkeypatch):
         testenv.dns_preflight(hosts=("registry.terraform.io",), timeout=2, interval=1)
 
     assert "resolvectl status || true" in commands
+
+
+def test_configure_lxd_juju_network_writes_reduced_network_yaml(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path
+) -> None:
+    calls: list[object] = []
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        calls.append((cmd, check))
+
+        class Result:
+            stdout = ""
+            returncode = 0
+
+        return Result()
+
+    def fake_lxd_network(network_name: str):
+        if network_name == "lxdbr0":
+            return "10.10.0.0/24", "10.10.0.1"
+        if network_name == testenv.EXT_LXD_NETWORK:
+            return "10.20.0.0/24", "10.20.0.1"
+        raise AssertionError(network_name)
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+    monkeypatch.setattr(testenv, "lxd_network_cidr_and_gateway", fake_lxd_network)
+
+    testenv.configure_lxd_juju_network(
+        controller=testenv.LXD_CONTROLLER, model="cephtools", lxdbridge="lxdbr0"
+    )
+
+    model_ref = f"{testenv.LXD_CONTROLLER}:cephtools"
+    assert calls == [
+        (["juju", "reload-spaces", "-m", model_ref], True),
+        (["juju", "add-space", testenv.EXTERNAL_SPACE_NAME, "-m", model_ref], False),
+        (
+            [
+                "juju",
+                "move-to-space",
+                testenv.EXTERNAL_SPACE_NAME,
+                "10.20.0.0/24",
+                "-m",
+                model_ref,
+            ],
+            True,
+        ),
+    ]
+    assert (state_home / "network.yaml").read_text() == (
+        "network:\n"
+        "  substrate: lxd\n"
+        "  bridge: lxdbr0\n"
+        "  cidr: 10.10.0.0/24\n"
+        "  gateway: 10.10.0.1\n"
+        "  external:\n"
+        "    bridge: ext\n"
+        "    cidr: 10.20.0.0/24\n"
+        "    gateway: 10.20.0.1\n"
+        "    space: external\n"
+    )
+
+
+def test_create_lxd_nodes_impl_adds_machines_and_block_volumes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[object] = []
+
+    monkeypatch.setattr(testenv, "_juju_machine_instance_ids", lambda *_: {})
+    monkeypatch.setattr(
+        testenv,
+        "_wait_for_lxd_juju_machines",
+        lambda *_args, **_kwargs: {"0": "juju-vm-0", "1": "juju-vm-1"},
+    )
+    monkeypatch.setattr(testenv, "_default_lxd_storage_pool", lambda: "default")
+    monkeypatch.setattr(testenv, "_lxd_storage_volume_exists", lambda *_args: False)
+    monkeypatch.setattr(testenv, "_lxd_instance_device_names", lambda *_args: set())
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        commands.append(cmd)
+
+        class Result:
+            stdout = ""
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    testenv._create_lxd_nodes_impl(
+        {"substrate": testenv.SUBSTRATE_LXD},
+        vm_data_disk_size=8,
+        vm_data_disk_count=2,
+        vm_count=2,
+    )
+
+    assert commands[0] == [
+        "juju",
+        "add-machine",
+        "-n",
+        "2",
+        "--constraints",
+        "virt-type=virtual-machine",
+        "-m",
+        f"{testenv.LXD_CONTROLLER}:{testenv.CEPHTOOLS_MODEL}",
+    ]
+    assert [
+        "lxc",
+        "storage",
+        "volume",
+        "create",
+        "default",
+        "cephtools-0-osd-0",
+        "--type=block",
+        "size=8GiB",
+    ] in commands
+    assert [
+        "lxc",
+        "config",
+        "device",
+        "add",
+        "juju-vm-1",
+        "osd-1",
+        "disk",
+        "pool=default",
+        "source=cephtools-1-osd-1",
+    ] in commands
+
+
+def test_destroy_lxd_nodes_impl_detaches_disks_removes_volumes_and_machines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[object] = []
+
+    monkeypatch.setattr(
+        testenv,
+        "_juju_machine_instance_ids",
+        lambda *_args: {"1": "juju-vm-1", "0": "juju-vm-0"},
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_lxd_instance_device_names",
+        lambda instance: {"root", "osd-1", "osd-0"}
+        if instance == "juju-vm-0"
+        else {"root", "osd-0"},
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_lxd_osd_volumes",
+        lambda: testenv.CleanupPhaseResult("delete LXD OSD volumes", "ok", "removed"),
+    )
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        commands.append(cmd)
+
+        class Result:
+            stdout = ""
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    testenv._destroy_lxd_nodes_impl({"substrate": testenv.SUBSTRATE_LXD})
+
+    assert ["lxc", "config", "device", "remove", "juju-vm-0", "osd-0"] in commands
+    assert ["lxc", "config", "device", "remove", "juju-vm-1", "osd-0"] in commands
+    assert commands[-1] == [
+        "juju",
+        "remove-machine",
+        "0",
+        "1",
+        "--force",
+        "--no-wait",
+        "--no-prompt",
+        "-m",
+        f"{testenv.LXD_CONTROLLER}:{testenv.CEPHTOOLS_MODEL}",
+    ]
 
 
 def test_create_nodes_impl_invokes_terragrunt(
@@ -1237,6 +1445,50 @@ def test_ensure_juju_model_creates_and_sets_constraints(monkeypatch):
     ]
 
 
+def test_ensure_juju_model_accepts_controller_and_constraint(monkeypatch):
+    calls: list[tuple] = []
+    models_payload = {"models": []}
+
+    class FakeJuju:
+        def __init__(self, model: str | None = None, **_: object) -> None:
+            self.model = model
+
+        def cli(self, *args: str, include_model: bool = True, **__: object) -> str:
+            calls.append(("cli", self.model, args, include_model))
+            if args and args[0] == "models":
+                return json.dumps(models_payload)
+            return ""
+
+        def add_model(self, model: str, **kwargs: object) -> None:
+            calls.append(("add_model", model, kwargs))
+
+    monkeypatch.setattr(
+        testenv.jubilant, "Juju", lambda *args, **kwargs: FakeJuju(*args, **kwargs)
+    )
+
+    testenv._ensure_juju_model(
+        "cephtools",
+        controller=testenv.LXD_CONTROLLER,
+        constraint="virt-type=virtual-machine",
+    )
+
+    assert calls == [
+        (
+            "cli",
+            None,
+            ("models", "--format", "json", "--controller", testenv.LXD_CONTROLLER),
+            False,
+        ),
+        ("add_model", "cephtools", {"controller": testenv.LXD_CONTROLLER}),
+        (
+            "cli",
+            f"{testenv.LXD_CONTROLLER}:cephtools",
+            ("set-model-constraints", "virt-type=virtual-machine"),
+            True,
+        ),
+    ]
+
+
 def test_ensure_juju_model_skips_existing(monkeypatch):
     calls: list[tuple] = []
     models_payload = {"models": [{"name": "cephtools"}]}
@@ -1293,6 +1545,7 @@ class DummyJuju:
         self.add_cloud_calls = 0
         self.add_credential_calls = 0
         self.bootstrap_calls: list[tuple[str, str]] = []
+        self.bootstrap_kwargs: list[dict[str, object]] = []
         self.switch_calls: list[str] = []
         self.add_cloud_error: jubilant.CLIError | None = None
         self.add_credential_error: jubilant.CLIError | None = None
@@ -1342,6 +1595,9 @@ class DummyJuju:
         config: dict | None = None,
     ):
         self.bootstrap_calls.append((cloud, controller))
+        self.bootstrap_kwargs.append(
+            {"bootstrap_constraints": bootstrap_constraints, "config": config}
+        )
         self.controllers = {
             controller: {"controller-machines": {"Total": 1}},
         }
@@ -1366,6 +1622,29 @@ def test_juju_onboard_bootstraps_when_missing(
     assert juju.bootstrap_calls == [("maas-cloud", "maas-controller")]
     assert juju.switch_calls == ["maas-controller"]
     assert "maas-controller" in juju.controllers
+
+
+def test_juju_onboard_lxd_bootstraps_localhost(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path
+):
+    state_home.mkdir(parents=True, exist_ok=True)
+    juju = DummyJuju()
+    monkeypatch.setattr(testenv.jubilant, "Juju", lambda *args, **kwargs: juju)
+    monkeypatch.setattr(testenv.time, "sleep", lambda *args, **kwargs: None)
+
+    bootstrapped = testenv.juju_onboard(testenv.SUBSTRATE_LXD)
+
+    assert bootstrapped is True
+    assert juju.add_cloud_calls == 0
+    assert juju.add_credential_calls == 0
+    assert juju.bootstrap_calls == [("localhost", testenv.LXD_CONTROLLER)]
+    assert juju.bootstrap_kwargs == [
+        {
+            "bootstrap_constraints": {"virt-type": "virtual-machine"},
+            "config": None,
+        }
+    ]
+    assert juju.switch_calls == [testenv.LXD_CONTROLLER]
 
 
 def test_juju_onboard_is_repeatable(monkeypatch: pytest.MonkeyPatch, state_home: Path):

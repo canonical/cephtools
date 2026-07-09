@@ -24,6 +24,8 @@ DEFAULT_TESTFLINGER_DEPLOY_RESERVE_FOR = 21600
 
 DEFAULT_JUJU_MODEL = "cephtools"
 
+TESTENV_SUBSTRATES = ("maas-host", "maas-vm", "lxd")
+
 _TESTENV_DEFAULTS_FALLBACK: dict[str, Any] = {
     "maas_version": "3.7",
     "admin": "admin",
@@ -31,7 +33,7 @@ _TESTENV_DEFAULTS_FALLBACK: dict[str, Any] = {
     "admin_mail": "admin@example.com",
     "lxdbridge": "lxdbr0",
     "maas_lxdbridge": "maasbr0",
-    "maas_mode": "host",
+    "substrate": "maas-host",
     "maas_vm_name": "maas-vm",
     "maas_vm_cpus": 8,
     "maas_vm_memory": "16GiB",
@@ -153,7 +155,18 @@ def load_testenv_defaults(path: Path | None = None) -> dict[str, Any]:
                 "Configuration value 'testenv.maas_ch' is no longer supported; "
                 "use 'testenv.maas_version' instead."
             )
-        if key == "maas_version" and not isinstance(value, str):
+        if key == "maas_mode":
+            raise click.ClickException(
+                "Configuration value 'testenv.maas_mode' is no longer supported; "
+                "use 'testenv.substrate' with one of: maas-host, maas-vm, lxd."
+            )
+        if key == "substrate":
+            if not isinstance(value, str) or value not in TESTENV_SUBSTRATES:
+                choices = ", ".join(TESTENV_SUBSTRATES)
+                raise click.ClickException(
+                    f"Configuration value 'testenv.substrate' must be one of: {choices}."
+                )
+        elif key == "maas_version" and not isinstance(value, str):
             raise click.ClickException(
                 "Configuration value 'testenv.maas_version' must be a quoted "
                 'string (for example "3.7") to avoid YAML numeric coercion.'

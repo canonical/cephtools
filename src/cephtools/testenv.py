@@ -22,10 +22,8 @@ from cephtools.config import (
 )
 from cephtools.progress import (
     emit,
-    checkpoint,
     install_fault_handlers,
     mark_complete,
-    mark_failed,
     operation,
 )
 from cephtools.state import get_state_file
@@ -42,6 +40,7 @@ DEFAULTS = load_testenv_defaults()
 CEPHTOOLS_TAG = DEFAULTS["maas_tag"]
 CEPHTOOLS_MODEL = load_cephtools_config(ensure=True)["juju_model"]
 MAAS_CONTROLLER = "maas-controller"
+LXD_CONTROLLER = "lxd-controller"
 REQUIRED_BOOT_ARCHITECTURE = "amd64/generic"
 EXT_LXD_NETWORK = "ext"
 EXTERNAL_SPACE_NAME = "external"
@@ -62,8 +61,10 @@ BIND9_STOP_TIMEOUT_SECONDS = 30
 BIND9_STOP_INTERVAL_SECONDS = 1
 LXD_INIT_RETRY_DELAY_SECONDS = 2
 WARMUP_VM_NAME = "warmup-vm"
-MAAS_MODE_HOST = "host"
-MAAS_MODE_VM = "vm"
+SUBSTRATE_MAAS_HOST = "maas-host"
+SUBSTRATE_MAAS_VM = "maas-vm"
+SUBSTRATE_LXD = "lxd"
+SUBSTRATES = (SUBSTRATE_MAAS_HOST, SUBSTRATE_MAAS_VM, SUBSTRATE_LXD)
 MAAS_VM_BOOTSTRAP_SCRIPT = "/tmp/cephtools-maas-vm-bootstrap.sh"
 TESTENV_STATE_FILENAMES = ("cloud.yaml", "cred.yaml", "network.yaml")
 USER_JUJU_STATE_PATHS = (
@@ -134,6 +135,24 @@ def _message_indicates_not_found(message: str) -> bool:
             "no matching snaps installed",
         )
     )
+
+
+def _is_maas_substrate(substrate: str) -> bool:
+    return substrate in {SUBSTRATE_MAAS_HOST, SUBSTRATE_MAAS_VM}
+
+
+def _controller_name(substrate: str) -> str:
+    return LXD_CONTROLLER if substrate == SUBSTRATE_LXD else MAAS_CONTROLLER
+
+
+def _cloud_name(substrate: str) -> str:
+    return "localhost" if substrate == SUBSTRATE_LXD else "maas-cloud"
+
+
+def _model_constraint(substrate: str) -> str | None:
+    if substrate == SUBSTRATE_LXD:
+        return "virt-type=virtual-machine"
+    return f"tags={CEPHTOOLS_TAG}"
 
 
 def _resolve_terragrunt_dir() -> Path:
@@ -336,7 +355,9 @@ def _tag_data_disks(
             )
 
 
-def _ensure_juju_model(model: str, *, constraint: str) -> None:
+def _ensure_juju_model(
+    model: str, *, controller: str = MAAS_CONTROLLER, constraint: str | None = None
+) -> None:
     juju = jubilant.Juju()
     try:
         models_output = juju.cli(
@@ -344,7 +365,7 @@ def _ensure_juju_model(model: str, *, constraint: str) -> None:
             "--format",
             "json",
             "--controller",
-            MAAS_CONTROLLER,
+            controller,
             include_model=False,
         )
     except jubilant.CLIError as exc:
@@ -367,14 +388,17 @@ def _ensure_juju_model(model: str, *, constraint: str) -> None:
     )
     if not existing:
         try:
-            juju.add_model(model, controller=MAAS_CONTROLLER)
+            juju.add_model(model, controller=controller)
         except jubilant.CLIError as exc:
             message = _format_juju_error(exc)
             raise click.ClickException(
                 f"Failed to add Juju model '{model}': {message}"
             ) from exc
 
-    juju_for_model = jubilant.Juju(model=f"{MAAS_CONTROLLER}:{model}")
+    if constraint is None:
+        return
+
+    juju_for_model = jubilant.Juju(model=f"{controller}:{model}")
     try:
         juju_for_model.cli("set-model-constraints", constraint)
     except jubilant.CLIError as exc:
@@ -921,6 +945,15 @@ def lxd_init_vm_impl(
     time.sleep(2)
 
 
+def lxd_init_lxd_impl(admin_pw: str, lxdbridge: str) -> None:
+    """Initialize host LXD for the LXD-only substrate."""
+    _configure_lxd_common(admin_pw)
+    ensure_lxd_host_network(lxdbridge)
+    ensure_lxd_default_profile_network(lxdbridge)
+    ensure_lxd_host_network(EXT_LXD_NETWORK)
+    time.sleep(2)
+
+
 def verify_lxd(lxdbridge):
     info = json.loads(run("lxc query /1.0").stdout)
     if info.get("api_status") != "stable":
@@ -965,10 +998,7 @@ def lxd_warmup():
                 break
             except subprocess.CalledProcessError:
                 remaining = max(0, int(deadline - time.monotonic()))
-                emit(
-                    f"lxd_warmup: attempt {attempt} not ready, "
-                    f"{remaining}s remaining"
-                )
+                emit(f"lxd_warmup: attempt {attempt} not ready, {remaining}s remaining")
 
         if not success:
             click.echo("Warning: Warmup apt-get update timed out.")
@@ -1936,64 +1966,74 @@ def _wait_for_controller_ready(juju: jubilant.Juju) -> None:
     raise click.ClickException("juju controller machines not ready after timeout")
 
 
-def juju_onboard() -> bool:
-    cloud_path = get_state_file("cloud.yaml")
-    cred_path = get_state_file("cred.yaml")
+def juju_onboard(substrate: str = SUBSTRATE_MAAS_HOST) -> bool:
     juju = jubilant.Juju()
-    if not _juju_cloud_exists(juju, "maas-cloud"):
-        click.echo("Registering Juju cloud 'maas-cloud'.")
-        try:
-            juju.cli(
-                "add-cloud",
-                "maas-cloud",
-                str(cloud_path),
-                "--client",
-                include_model=False,
-            )
-        except jubilant.CLIError as exc:
-            if not _is_already_exists_error(exc):
-                raise
-            click.echo("Juju reports cloud already exists; continuing.")
-    else:
-        click.echo("Juju cloud 'maas-cloud' already registered; skipping.")
+    cloud_name = _cloud_name(substrate)
+    controller_name = _controller_name(substrate)
 
-    if not _juju_credential_exists(juju, "maas-cloud", "admin"):
-        click.echo("Adding Juju credential 'admin' for cloud 'maas-cloud'.")
-        try:
-            juju.cli(
-                "add-credential",
-                "maas-cloud",
-                "-f",
-                str(cred_path),
-                "--client",
-                include_model=False,
-            )
-        except jubilant.CLIError as exc:
-            if not _is_already_exists_error(exc):
-                raise
-            click.echo("Juju reports credential already exists; continuing.")
+    if _is_maas_substrate(substrate):
+        cloud_path = get_state_file("cloud.yaml")
+        cred_path = get_state_file("cred.yaml")
+        if not _juju_cloud_exists(juju, cloud_name):
+            click.echo(f"Registering Juju cloud '{cloud_name}'.")
+            try:
+                juju.cli(
+                    "add-cloud",
+                    cloud_name,
+                    str(cloud_path),
+                    "--client",
+                    include_model=False,
+                )
+            except jubilant.CLIError as exc:
+                if not _is_already_exists_error(exc):
+                    raise
+                click.echo("Juju reports cloud already exists; continuing.")
+        else:
+            click.echo(f"Juju cloud '{cloud_name}' already registered; skipping.")
+
+        if not _juju_credential_exists(juju, cloud_name, "admin"):
+            click.echo(f"Adding Juju credential 'admin' for cloud '{cloud_name}'.")
+            try:
+                juju.cli(
+                    "add-credential",
+                    cloud_name,
+                    "-f",
+                    str(cred_path),
+                    "--client",
+                    include_model=False,
+                )
+            except jubilant.CLIError as exc:
+                if not _is_already_exists_error(exc):
+                    raise
+                click.echo("Juju reports credential already exists; continuing.")
+        else:
+            click.echo("Juju credential 'admin' already present; skipping.")
+
+        bootstrap_constraints: dict[str, str] = {"spaces": JUJU_SPACE_NAME}
+        bootstrap_config: dict[str, str] | None = {"juju-mgmt-space": JUJU_SPACE_NAME}
     else:
-        click.echo("Juju credential 'admin' already present; skipping.")
+        bootstrap_constraints = {"virt-type": "virtual-machine"}
+        bootstrap_config = None
 
     time.sleep(2)
 
     bootstrapped = False
-    if not _juju_controller_exists(juju, MAAS_CONTROLLER):
-        click.echo(f"Bootstrapping Juju controller '{MAAS_CONTROLLER}'.")
-        juju.bootstrap(
-            "maas-cloud",
-            MAAS_CONTROLLER,
-            bootstrap_constraints={"spaces": JUJU_SPACE_NAME},
-            config={"juju-mgmt-space": JUJU_SPACE_NAME},
-        )
+    if not _juju_controller_exists(juju, controller_name):
+        click.echo(f"Bootstrapping Juju controller '{controller_name}'.")
+        bootstrap_kwargs: dict[str, object] = {
+            "bootstrap_constraints": bootstrap_constraints
+        }
+        if bootstrap_config is not None:
+            bootstrap_kwargs["config"] = bootstrap_config
+        juju.bootstrap(cloud_name, controller_name, **bootstrap_kwargs)
         bootstrapped = True
     else:
         click.echo(
-            f"Juju controller '{MAAS_CONTROLLER}' already exists; skipping bootstrap."
+            f"Juju controller '{controller_name}' already exists; skipping bootstrap."
         )
 
-    click.echo(f"Switching to Juju controller '{MAAS_CONTROLLER}'.")
-    juju.cli("switch", MAAS_CONTROLLER, include_model=False)
+    click.echo(f"Switching to Juju controller '{controller_name}'.")
+    juju.cli("switch", controller_name, include_model=False)
 
     if bootstrapped:
         click.echo("Waiting for controller machines to report ready status.")
@@ -2007,8 +2047,244 @@ def _is_already_exists_error(exc: jubilant.CLIError) -> bool:
     return "already exists" in message
 
 
+def _juju_model_ref(controller: str, model: str) -> str:
+    return f"{controller}:{model}"
+
+
+def write_lxd_network_yaml(
+    *,
+    lxdbridge: str,
+    lxd_cidr: str,
+    lxd_gateway: str,
+    ext_cidr: str,
+    ext_gateway: str,
+) -> Path:
+    network_yaml = "\n".join(
+        [
+            "network:",
+            f"  substrate: {SUBSTRATE_LXD}",
+            f"  bridge: {lxdbridge}",
+            f"  cidr: {lxd_cidr}",
+            f"  gateway: {lxd_gateway}",
+            "  external:",
+            f"    bridge: {EXT_LXD_NETWORK}",
+            f"    cidr: {ext_cidr}",
+            f"    gateway: {ext_gateway}",
+            f"    space: {EXTERNAL_SPACE_NAME}",
+            "",
+        ]
+    )
+    network_path = get_state_file("network.yaml")
+    network_path.write_text(network_yaml)
+    return network_path
+
+
+def configure_lxd_juju_network(*, controller: str, model: str, lxdbridge: str) -> None:
+    lxd_cidr, lxd_gateway = lxd_network_cidr_and_gateway(lxdbridge)
+    ext_cidr, ext_gateway = lxd_network_cidr_and_gateway(EXT_LXD_NETWORK)
+    model_ref = _juju_model_ref(controller, model)
+    run(["juju", "reload-spaces", "-m", model_ref])
+    run(["juju", "add-space", EXTERNAL_SPACE_NAME, "-m", model_ref], check=False)
+    run(["juju", "move-to-space", EXTERNAL_SPACE_NAME, ext_cidr, "-m", model_ref])
+    write_lxd_network_yaml(
+        lxdbridge=lxdbridge,
+        lxd_cidr=lxd_cidr,
+        lxd_gateway=lxd_gateway,
+        ext_cidr=ext_cidr,
+        ext_gateway=ext_gateway,
+    )
+
+
+def _machine_sort_key(machine_id: str) -> tuple[int, str]:
+    return (0, f"{int(machine_id):012d}") if machine_id.isdigit() else (1, machine_id)
+
+
+def _juju_machine_instance_ids(controller: str, model: str) -> dict[str, str]:
+    result = run(
+        [
+            "juju",
+            "machines",
+            "--format",
+            "json",
+            "-m",
+            _juju_model_ref(controller, model),
+        ],
+        quiet=True,
+    )
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
+        raise click.ClickException("Failed to parse Juju machines output.") from exc
+    machines = payload.get("machines")
+    if not isinstance(machines, dict):
+        return {}
+
+    instance_ids: dict[str, str] = {}
+    for machine_id, machine in machines.items():
+        if not isinstance(machine, dict):
+            continue
+        instance_id = machine.get("instance-id")
+        if isinstance(instance_id, str) and instance_id and instance_id != "pending":
+            instance_ids[str(machine_id)] = instance_id
+    return instance_ids
+
+
+def _wait_for_lxd_juju_machines(
+    controller: str,
+    model: str,
+    desired_count: int,
+    *,
+    timeout: int = 900,
+    interval: int = 10,
+) -> dict[str, str]:
+    deadline = time.monotonic() + timeout
+    attempt = 0
+    while time.monotonic() < deadline:
+        attempt += 1
+        instance_ids = _juju_machine_instance_ids(controller, model)
+        if len(instance_ids) >= desired_count:
+            selected = sorted(instance_ids, key=_machine_sort_key)[:desired_count]
+            return {machine_id: instance_ids[machine_id] for machine_id in selected}
+        remaining = max(0, int(deadline - time.monotonic()))
+        emit(
+            f"wait_for_lxd_juju_machines: attempt {attempt}, "
+            f"ready={len(instance_ids)}/{desired_count}, {remaining}s remaining"
+        )
+        time.sleep(interval)
+    raise click.ClickException(
+        f"Timed out waiting for {desired_count} Juju LXD machines in model {model}."
+    )
+
+
+def _lxd_storage_volume_exists(pool: str, volume: str) -> bool:
+    result = run(
+        ["lxc", "storage", "volume", "show", pool, f"custom/{volume}"],
+        check=False,
+        quiet=True,
+    )
+    return result.returncode == 0
+
+
+def _lxd_instance_device_names(instance: str) -> set[str]:
+    result = run(["lxc", "query", f"/1.0/instances/{instance}"], quiet=True)
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
+        raise click.ClickException(
+            f"Failed to parse LXD instance {instance} JSON."
+        ) from exc
+    devices = payload.get("devices")
+    if not isinstance(devices, dict):
+        return set()
+    return {str(name) for name in devices}
+
+
+def _lxd_osd_volume_name(machine_id: str, disk_index: int) -> str:
+    return f"{CEPHTOOLS_MODEL}-{machine_id}-osd-{disk_index}"
+
+
+def _attach_lxd_osd_volumes(
+    machine_to_instance: dict[str, str], *, disk_count: int, disk_size: int
+) -> None:
+    pool = _default_lxd_storage_pool()
+    for machine_id, instance in machine_to_instance.items():
+        existing_devices = _lxd_instance_device_names(instance)
+        for disk_index in range(disk_count):
+            volume = _lxd_osd_volume_name(machine_id, disk_index)
+            device = f"osd-{disk_index}"
+            if not _lxd_storage_volume_exists(pool, volume):
+                run(
+                    [
+                        "lxc",
+                        "storage",
+                        "volume",
+                        "create",
+                        pool,
+                        volume,
+                        "--type=block",
+                        f"size={disk_size}GiB",
+                    ]
+                )
+            if device not in existing_devices:
+                run(
+                    [
+                        "lxc",
+                        "config",
+                        "device",
+                        "add",
+                        instance,
+                        device,
+                        "disk",
+                        f"pool={pool}",
+                        f"source={volume}",
+                    ]
+                )
+
+
+def _detach_lxd_osd_devices(machine_to_instance: dict[str, str]) -> None:
+    for instance in machine_to_instance.values():
+        for device in sorted(_lxd_instance_device_names(instance)):
+            if device.startswith("osd-"):
+                run(["lxc", "config", "device", "remove", instance, device])
+
+
+def _create_lxd_nodes_impl(
+    ctx_obj: dict[str, object],
+    vm_data_disk_size: int,
+    vm_data_disk_count: int,
+    vm_count: int,
+) -> None:
+    controller = _controller_name(str(ctx_obj["substrate"]))
+    model = CEPHTOOLS_MODEL
+    existing = _juju_machine_instance_ids(controller, model)
+    missing = max(0, vm_count - len(existing))
+    if missing:
+        run(
+            [
+                "juju",
+                "add-machine",
+                "-n",
+                str(missing),
+                "--constraints",
+                "virt-type=virtual-machine",
+                "-m",
+                _juju_model_ref(controller, model),
+            ]
+        )
+    machine_to_instance = _wait_for_lxd_juju_machines(controller, model, vm_count)
+    _attach_lxd_osd_volumes(
+        machine_to_instance,
+        disk_count=vm_data_disk_count,
+        disk_size=vm_data_disk_size,
+    )
+
+
+def _destroy_lxd_nodes_impl(ctx_obj: dict[str, object]) -> None:
+    controller = _controller_name(str(ctx_obj["substrate"]))
+    model = CEPHTOOLS_MODEL
+    machine_to_instance = _juju_machine_instance_ids(controller, model)
+    if not machine_to_instance:
+        return
+    _detach_lxd_osd_devices(machine_to_instance)
+    cleanup_result = _cleanup_lxd_osd_volumes()
+    if cleanup_result.failed:
+        raise click.ClickException(cleanup_result.detail)
+    run(
+        [
+            "juju",
+            "remove-machine",
+            *sorted(machine_to_instance, key=_machine_sort_key),
+            "--force",
+            "--no-wait",
+            "--no-prompt",
+            "-m",
+            _juju_model_ref(controller, model),
+        ]
+    )
+
+
 def _create_nodes_impl(
-    ctx_obj: dict[str, str],
+    ctx_obj: dict[str, object],
     vm_data_disk_size: int,
     vm_data_disk_count: int,
     vm_count: int,
@@ -2020,9 +2296,18 @@ def _create_nodes_impl(
     if vm_count <= 0:
         raise click.ClickException("--vm-count must be a positive integer.")
 
+    if ctx_obj.get("substrate") == SUBSTRATE_LXD:
+        _create_lxd_nodes_impl(
+            ctx_obj,
+            vm_data_disk_size,
+            vm_data_disk_count,
+            vm_count,
+        )
+        return
+
     maas_vm_name = (
         ctx_obj.get("maas_vm_name")
-        if ctx_obj.get("maas_mode") == MAAS_MODE_VM
+        if ctx_obj.get("substrate") == SUBSTRATE_MAAS_VM
         else None
     )
     _get_lxd_vm_host_id(
@@ -2672,6 +2957,50 @@ def _cleanup_restore_systemd_timesyncd(*, dry_run: bool = False) -> CleanupPhase
     return CleanupPhaseResult(phase, "ok", "installed and enabled systemd-timesyncd")
 
 
+def _cleanup_lxd_osd_volumes(*, dry_run: bool = False) -> CleanupPhaseResult:
+    phase = "delete LXD OSD volumes"
+    prefix = f"{CEPHTOOLS_MODEL}-"
+    if dry_run:
+        return CleanupPhaseResult(
+            phase,
+            "ok",
+            f"dry-run: would delete LXD custom block volumes prefixed {prefix}",
+        )
+    if shutil.which("lxc") is None:
+        return CleanupPhaseResult(phase, "skipped", "lxc command not found")
+    try:
+        pool = _default_lxd_storage_pool()
+        result = run(["lxc", "storage", "volume", "list", pool, "--format", "json"])
+        volumes = json.loads(result.stdout or "[]")
+    except (
+        click.ClickException,
+        subprocess.CalledProcessError,
+        json.JSONDecodeError,
+    ) as exc:
+        return CleanupPhaseResult(phase, "failed", str(exc))
+
+    deleted: list[str] = []
+    for volume in volumes:
+        if not isinstance(volume, dict):
+            continue
+        name = volume.get("name")
+        content_type = volume.get("content_type")
+        volume_type = volume.get("type")
+        if not isinstance(name, str) or not name.startswith(prefix):
+            continue
+        if volume_type != "custom" or content_type != "block":
+            continue
+        try:
+            run(["lxc", "storage", "volume", "delete", pool, f"custom/{name}"])
+        except subprocess.CalledProcessError as exc:
+            return CleanupPhaseResult(phase, "failed", _format_process_error(exc))
+        deleted.append(name)
+
+    if not deleted:
+        return CleanupPhaseResult(phase, "skipped", "no matching LXD OSD volumes")
+    return CleanupPhaseResult(phase, "ok", "deleted " + ", ".join(sorted(deleted)))
+
+
 def _emit_cleanup_summary(results: list[CleanupPhaseResult]) -> None:
     click.echo("Cleanup summary:")
     for result in results:
@@ -2717,11 +3046,11 @@ def _emit_cleanup_summary(results: list[CleanupPhaseResult]) -> None:
     help="Normal host LXD bridge name",
 )
 @click.option(
-    "--maas-mode",
-    type=click.Choice([MAAS_MODE_HOST, MAAS_MODE_VM]),
-    default=DEFAULTS["maas_mode"],
+    "--substrate",
+    type=click.Choice(list(SUBSTRATES)),
+    default=DEFAULTS["substrate"],
     show_default=True,
-    help="Run MAAS on the host or inside an isolated LXD VM.",
+    help="Choose the test environment substrate.",
 )
 @click.option(
     "--maas-lxdbridge",
@@ -2786,7 +3115,7 @@ def cli(
     admin_mail,
     maas_version,
     lxdbridge,
-    maas_mode,
+    substrate,
     maas_lxdbridge,
     maas_vm_name,
     maas_vm_cpus,
@@ -2804,7 +3133,7 @@ def cli(
         admin_mail=admin_mail,
         maas_version=maas_version,
         lxdbridge=lxdbridge,
-        maas_mode=maas_mode,
+        substrate=substrate,
         maas_lxdbridge=maas_lxdbridge,
         maas_vm_name=maas_vm_name,
         maas_vm_cpus=maas_vm_cpus,
@@ -2820,7 +3149,7 @@ def cli(
 
 
 def _ctx_maas_vm_name(ctx_obj: dict[str, object]) -> str | None:
-    if ctx_obj.get("maas_mode") == MAAS_MODE_VM:
+    if ctx_obj.get("substrate") == SUBSTRATE_MAAS_VM:
         return str(ctx_obj["maas_vm_name"])
     return None
 
@@ -2834,28 +3163,32 @@ def _ctx_maas_vm_ip(ctx_obj: dict[str, object]) -> str:
 
 
 def _ctx_maas_url(ctx_obj: dict[str, object]) -> str:
-    if ctx_obj.get("maas_mode") == MAAS_MODE_VM:
+    if ctx_obj.get("substrate") == SUBSTRATE_MAAS_VM:
         return f"http://{_ctx_maas_vm_ip(ctx_obj)}:5240/MAAS"
     return str(ctx_obj["maas_url"])
 
 
 def _ctx_maas_bridge(ctx_obj: dict[str, object]) -> str:
-    if ctx_obj.get("maas_mode") == MAAS_MODE_VM:
+    if ctx_obj.get("substrate") == SUBSTRATE_MAAS_VM:
         return str(ctx_obj["maas_lxdbridge"])
     return str(ctx_obj["lxdbridge"])
 
 
 @cli.command(
     "install-deps",
-    help="Install MAAS from debs with PostgreSQL, plus lxd, terraform, and terragrunt.",
+    help="Install substrate dependencies.",
 )
 @click.pass_context
 def install_deps(ctx):
-    if ctx.obj["maas_mode"] == MAAS_MODE_HOST:
+    substrate = ctx.obj["substrate"]
+    if substrate == SUBSTRATE_MAAS_HOST:
         install_maas_deb(ctx.obj["maas_version"])
     ensure_snap("lxd")
-    ensure_snap("terraform", classic=True)
-    ensure_terragrunt()
+    if substrate == SUBSTRATE_LXD:
+        ensure_snap("juju")
+    else:
+        ensure_snap("terraform", classic=True)
+        ensure_terragrunt()
     lxd_ready()
     click.echo("deps installed.")
 
@@ -2863,17 +3196,20 @@ def install_deps(ctx):
 @cli.command("lxd-init", help="Initialize LXD and tweak bridge.")
 @click.pass_context
 def lxd_init_cmd(ctx):
-    if ctx.obj["maas_mode"] == MAAS_MODE_VM:
+    substrate = ctx.obj["substrate"]
+    if substrate == SUBSTRATE_MAAS_VM:
         lxd_init_vm_impl(
             ctx.obj["admin_pw"],
             ctx.obj["lxdbridge"],
             ctx.obj["maas_lxdbridge"],
             ctx.obj["maas_lxd_project"],
         )
+    elif substrate == SUBSTRATE_LXD:
+        lxd_init_lxd_impl(ctx.obj["admin_pw"], ctx.obj["lxdbridge"])
     else:
         lxd_init_impl(ctx.obj["ip"], ctx.obj["admin_pw"], ctx.obj["lxdbridge"])
     verify_lxd(ctx.obj["lxdbridge"])
-    if ctx.obj["maas_mode"] == MAAS_MODE_HOST:
+    if substrate == SUBSTRATE_MAAS_HOST:
         lxd_warmup()
     click.echo("lxd ready.")
 
@@ -2884,8 +3220,8 @@ def lxd_init_cmd(ctx):
 )
 @click.pass_context
 def maas_vm_init_cmd(ctx):
-    if ctx.obj["maas_mode"] != MAAS_MODE_VM:
-        raise click.ClickException("maas-vm-init requires --maas-mode vm")
+    if ctx.obj["substrate"] != SUBSTRATE_MAAS_VM:
+        raise click.ClickException("maas-vm-init requires --substrate maas-vm")
     maas_vm_ip = _ctx_maas_vm_ip(ctx.obj)
     maas_url = _ctx_maas_url(ctx.obj)
     api_key = maas_vm_init_impl(
@@ -2915,7 +3251,10 @@ def maas_vm_init_cmd(ctx):
 )
 @click.pass_context
 def maas_init_cmd(ctx):
-    if ctx.obj["maas_mode"] == MAAS_MODE_VM:
+    if ctx.obj["substrate"] == SUBSTRATE_LXD:
+        click.echo("maas-init skipped for --substrate lxd.")
+        return
+    if ctx.obj["substrate"] == SUBSTRATE_MAAS_VM:
         ctx.invoke(maas_vm_init_cmd)
         return
     dns_preflight()
@@ -2943,6 +3282,9 @@ def maas_init_cmd(ctx):
 )
 @click.pass_context
 def configure_bind9(ctx):
+    if ctx.obj["substrate"] == SUBSTRATE_LXD:
+        click.echo("configure-bind9 skipped for --substrate lxd.")
+        return
     configure_maas_bind9_ipv4()
     click.echo("maas bind9 configured.")
 
@@ -2950,8 +3292,11 @@ def configure_bind9(ctx):
 @cli.command("register-vm-host", help="Register local LXD as MAAS VM host.")
 @click.pass_context
 def register_vm_host(ctx):
+    if ctx.obj["substrate"] == SUBSTRATE_LXD:
+        click.echo("register-vm-host skipped for --substrate lxd.")
+        return
     maas_vm_name = _ctx_maas_vm_name(ctx.obj)
-    if ctx.obj["maas_mode"] == MAAS_MODE_VM:
+    if ctx.obj["substrate"] == SUBSTRATE_MAAS_VM:
         _, lxd_api_ip = lxd_network_cidr_and_gateway(ctx.obj["maas_lxdbridge"])
         project = ctx.obj["maas_lxd_project"]
     else:
@@ -2983,9 +3328,20 @@ def register_vm_host(ctx):
 )
 @click.pass_context
 def configure_network(ctx):
+    if ctx.obj["substrate"] == SUBSTRATE_LXD:
+        configure_lxd_juju_network(
+            controller=_controller_name(SUBSTRATE_LXD),
+            model=CEPHTOOLS_MODEL,
+            lxdbridge=ctx.obj["lxdbridge"],
+        )
+        click.echo(
+            f"space '{EXTERNAL_SPACE_NAME}' configured from LXD network {EXT_LXD_NETWORK}."
+        )
+        return
+
     maas_vm_name = _ctx_maas_vm_name(ctx.obj)
     bridge = _ctx_maas_bridge(ctx.obj)
-    if ctx.obj["maas_mode"] == MAAS_MODE_VM:
+    if ctx.obj["substrate"] == SUBSTRATE_MAAS_VM:
         cidr, gw = lxd_network_cidr_and_gateway(bridge)
         reserved_ips = {gw, _ctx_maas_vm_ip(ctx.obj)}
     else:
@@ -3014,7 +3370,7 @@ def configure_network(ctx):
     )
     click.echo(f"space '{JUJU_SPACE_NAME}' ({space_id}) created and assigned to VLAN.")
 
-    if ctx.obj["maas_mode"] == MAAS_MODE_HOST:
+    if ctx.obj["substrate"] == SUBSTRATE_MAAS_HOST:
         ext_cidr, ext_gw = lxd_network_cidr_and_gateway(EXT_LXD_NETWORK)
         ext_sid, ext_fabric_id, ext_vlan_id, ext_rack_sysid = maas_subnet_ids(
             ctx.obj["admin"], ext_cidr
@@ -3052,7 +3408,7 @@ def configure_network(ctx):
             f"  rack_sysid: {rack_sysid}",
             f"  space_id: {space_id}",
             "  external:",
-            f"    bridge: {EXT_LXD_NETWORK if ctx.obj['maas_mode'] == MAAS_MODE_HOST else bridge}",
+            f"    bridge: {EXT_LXD_NETWORK if ctx.obj['substrate'] == SUBSTRATE_MAAS_HOST else bridge}",
             f"    cidr: {ext_cidr}",
             f"    gateway: {ext_gw}",
             "    dynamic_range:",
@@ -3104,7 +3460,10 @@ def ensure_nodes(
     vm_count: int,
 ) -> None:
     _create_nodes_impl(ctx.obj, vm_data_disk_size, vm_data_disk_count, vm_count)
-    click.echo("Terragrunt apply completed; MAAS will reconcile VM nodes.")
+    if ctx.obj["substrate"] == SUBSTRATE_LXD:
+        click.echo("Juju LXD machines ensured and OSD block volumes attached.")
+    else:
+        click.echo("Terragrunt apply completed; MAAS will reconcile VM nodes.")
 
 
 @cli.command(
@@ -3113,6 +3472,10 @@ def ensure_nodes(
 )
 @click.pass_context
 def destroy_nodes(ctx):
+    if ctx.obj["substrate"] == SUBSTRATE_LXD:
+        _destroy_lxd_nodes_impl(ctx.obj)
+        click.echo("Juju LXD machines and OSD block volumes removed.")
+        return
     _destroy_nodes_impl()
     click.echo("Terragrunt destroy completed; MAAS will reconcile VM removals.")
 
@@ -3147,7 +3510,7 @@ def destroy_nodes(ctx):
 @click.option(
     "--keep-maas-vm",
     is_flag=True,
-    help="Do not delete the isolated MAAS VM in --maas-mode vm.",
+    help="Do not delete the isolated MAAS VM in --substrate maas-vm.",
 )
 @click.option(
     "--keep-state",
@@ -3194,37 +3557,66 @@ def cleanup(
     if dry_run:
         click.echo("Running cleanup in dry-run mode; no changes will be made.")
 
+    substrate = ctx.obj["substrate"]
     maas_vm_name = _ctx_maas_vm_name(ctx.obj)
+    controller_name = _controller_name(substrate)
 
     results: list[CleanupPhaseResult] = []
-    if keep_nodes:
-        nodes_result = CleanupPhaseResult(
-            "destroy nodes", "skipped", "preserved by --keep-nodes"
-        )
-    else:
-        nodes_result = (
-            _cleanup_destroy_nodes(dry_run=True)
-            if dry_run
-            else _cleanup_destroy_nodes()
-        )
-    results.append(nodes_result)
+    nodes_result: CleanupPhaseResult | None = None
+    if substrate != SUBSTRATE_LXD:
+        if keep_nodes:
+            nodes_result = CleanupPhaseResult(
+                "destroy nodes", "skipped", "preserved by --keep-nodes"
+            )
+        else:
+            nodes_result = (
+                _cleanup_destroy_nodes(dry_run=True)
+                if dry_run
+                else _cleanup_destroy_nodes()
+            )
+        results.append(nodes_result)
 
     if keep_controller:
         results.append(
             CleanupPhaseResult(
-                f"kill controller {MAAS_CONTROLLER}",
+                f"kill controller {controller_name}",
                 "skipped",
                 "preserved by --keep-controller",
             )
         )
     else:
         results.append(
-            _cleanup_kill_controller(MAAS_CONTROLLER, dry_run=True)
+            _cleanup_kill_controller(controller_name, dry_run=True)
             if dry_run
-            else _cleanup_kill_controller(MAAS_CONTROLLER)
+            else _cleanup_kill_controller(controller_name)
         )
 
-    if keep_vm_host:
+    if substrate == SUBSTRATE_LXD:
+        if keep_nodes:
+            nodes_result = CleanupPhaseResult(
+                "delete LXD OSD volumes", "skipped", "preserved by --keep-nodes"
+            )
+        elif keep_controller:
+            nodes_result = CleanupPhaseResult(
+                "delete LXD OSD volumes",
+                "skipped",
+                "preserved while controller is kept",
+            )
+        else:
+            nodes_result = (
+                _cleanup_lxd_osd_volumes(dry_run=True)
+                if dry_run
+                else _cleanup_lxd_osd_volumes()
+            )
+        results.append(nodes_result)
+        results.append(
+            CleanupPhaseResult(
+                f"delete vm host {ctx.obj['vmhost']}",
+                "skipped",
+                "not applicable for --substrate lxd",
+            )
+        )
+    elif keep_vm_host:
         results.append(
             CleanupPhaseResult(
                 f"delete vm host {ctx.obj['vmhost']}",
@@ -3314,7 +3706,15 @@ def cleanup(
             if dry_run
             else _cleanup_remove_state_files()
         )
-        if keep_nodes:
+        if substrate == SUBSTRATE_LXD:
+            results.append(
+                CleanupPhaseResult(
+                    "remove terragrunt inputs",
+                    "skipped",
+                    "not applicable for --substrate lxd",
+                )
+            )
+        elif keep_nodes:
             results.append(
                 CleanupPhaseResult(
                     "remove terragrunt inputs",
@@ -3338,89 +3738,101 @@ def cleanup(
             )
 
     if purge_installed:
-        results.extend(
-            [
-                _cleanup_remove_snap("juju", dry_run=True)
-                if dry_run
-                else _cleanup_remove_snap("juju"),
-                _cleanup_remove_user_paths(
-                    "remove Juju local state",
-                    USER_JUJU_STATE_PATHS,
-                    dry_run=True,
-                )
-                if dry_run
-                else _cleanup_remove_user_paths(
-                    "remove Juju local state",
-                    USER_JUJU_STATE_PATHS,
-                ),
-                _cleanup_purge_apt_packages(
-                    "purge MAAS apt packages",
-                    prefixes=("maas", "python3-maas", "bind9"),
-                    dry_run=True,
-                )
-                if dry_run
-                else _cleanup_purge_apt_packages(
-                    "purge MAAS apt packages",
-                    prefixes=("maas", "python3-maas", "bind9"),
-                ),
-                _cleanup_purge_apt_packages(
-                    "purge PostgreSQL apt packages",
-                    prefixes=("postgresql",),
-                    dry_run=True,
-                )
-                if dry_run
-                else _cleanup_purge_apt_packages(
-                    "purge PostgreSQL apt packages",
-                    prefixes=("postgresql",),
-                ),
-                _cleanup_purge_apt_packages(
-                    "purge testenv helper apt packages",
-                    exact_names=("software-properties-common", "lxd-installer"),
-                    dry_run=True,
-                )
-                if dry_run
-                else _cleanup_purge_apt_packages(
-                    "purge testenv helper apt packages",
-                    exact_names=("software-properties-common", "lxd-installer"),
-                ),
-                _cleanup_apt_autoremove(dry_run=True)
-                if dry_run
-                else _cleanup_apt_autoremove(),
-                _cleanup_remove_maas_ppa_sources(dry_run=True)
-                if dry_run
-                else _cleanup_remove_maas_ppa_sources(),
-                _cleanup_apt_update(dry_run=True) if dry_run else _cleanup_apt_update(),
-                _cleanup_restore_systemd_timesyncd(dry_run=True)
-                if dry_run
-                else _cleanup_restore_systemd_timesyncd(),
+        base_purge_results = [
+            _cleanup_remove_snap("juju", dry_run=True)
+            if dry_run
+            else _cleanup_remove_snap("juju"),
+            _cleanup_remove_user_paths(
+                "remove Juju local state",
+                USER_JUJU_STATE_PATHS,
+                dry_run=True,
+            )
+            if dry_run
+            else _cleanup_remove_user_paths(
+                "remove Juju local state",
+                USER_JUJU_STATE_PATHS,
+            ),
+        ]
+        results.extend(base_purge_results)
+        if substrate == SUBSTRATE_LXD:
+            results.append(
                 _cleanup_remove_snap("lxd", dry_run=True)
                 if dry_run
-                else _cleanup_remove_snap("lxd"),
-                _cleanup_remove_snap("terraform", dry_run=True)
-                if dry_run
-                else _cleanup_remove_snap("terraform"),
-                _cleanup_remove_root_paths(
-                    "remove Terragrunt binary",
-                    ("/usr/local/bin/terragrunt",),
-                    dry_run=True,
-                )
-                if dry_run
-                else _cleanup_remove_root_paths(
-                    "remove Terragrunt binary",
-                    ("/usr/local/bin/terragrunt",),
-                ),
-                _cleanup_remove_root_paths(
-                    "remove residual toolchain directories",
-                    TESTENV_ROOT_RESIDUAL_PATHS,
-                    dry_run=True,
-                )
-                if dry_run
-                else _cleanup_remove_root_paths(
-                    "remove residual toolchain directories",
-                    TESTENV_ROOT_RESIDUAL_PATHS,
-                ),
-            ]
-        )
+                else _cleanup_remove_snap("lxd")
+            )
+        else:
+            results.extend(
+                [
+                    _cleanup_purge_apt_packages(
+                        "purge MAAS apt packages",
+                        prefixes=("maas", "python3-maas", "bind9"),
+                        dry_run=True,
+                    )
+                    if dry_run
+                    else _cleanup_purge_apt_packages(
+                        "purge MAAS apt packages",
+                        prefixes=("maas", "python3-maas", "bind9"),
+                    ),
+                    _cleanup_purge_apt_packages(
+                        "purge PostgreSQL apt packages",
+                        prefixes=("postgresql",),
+                        dry_run=True,
+                    )
+                    if dry_run
+                    else _cleanup_purge_apt_packages(
+                        "purge PostgreSQL apt packages",
+                        prefixes=("postgresql",),
+                    ),
+                    _cleanup_purge_apt_packages(
+                        "purge testenv helper apt packages",
+                        exact_names=("software-properties-common", "lxd-installer"),
+                        dry_run=True,
+                    )
+                    if dry_run
+                    else _cleanup_purge_apt_packages(
+                        "purge testenv helper apt packages",
+                        exact_names=("software-properties-common", "lxd-installer"),
+                    ),
+                    _cleanup_apt_autoremove(dry_run=True)
+                    if dry_run
+                    else _cleanup_apt_autoremove(),
+                    _cleanup_remove_maas_ppa_sources(dry_run=True)
+                    if dry_run
+                    else _cleanup_remove_maas_ppa_sources(),
+                    _cleanup_apt_update(dry_run=True)
+                    if dry_run
+                    else _cleanup_apt_update(),
+                    _cleanup_restore_systemd_timesyncd(dry_run=True)
+                    if dry_run
+                    else _cleanup_restore_systemd_timesyncd(),
+                    _cleanup_remove_snap("lxd", dry_run=True)
+                    if dry_run
+                    else _cleanup_remove_snap("lxd"),
+                    _cleanup_remove_snap("terraform", dry_run=True)
+                    if dry_run
+                    else _cleanup_remove_snap("terraform"),
+                    _cleanup_remove_root_paths(
+                        "remove Terragrunt binary",
+                        ("/usr/local/bin/terragrunt",),
+                        dry_run=True,
+                    )
+                    if dry_run
+                    else _cleanup_remove_root_paths(
+                        "remove Terragrunt binary",
+                        ("/usr/local/bin/terragrunt",),
+                    ),
+                    _cleanup_remove_root_paths(
+                        "remove residual toolchain directories",
+                        TESTENV_ROOT_RESIDUAL_PATHS,
+                        dry_run=True,
+                    )
+                    if dry_run
+                    else _cleanup_remove_root_paths(
+                        "remove residual toolchain directories",
+                        TESTENV_ROOT_RESIDUAL_PATHS,
+                    ),
+                ]
+            )
 
     _emit_cleanup_summary(results)
     if any(result.failed for result in results):
@@ -3429,76 +3841,118 @@ def cleanup(
 
 @cli.command(
     "juju-init",
-    help="Install Juju, verify LXD/MAAS, write cred.yaml, add cloud/cred, bootstrap.",
+    help="Install Juju and bootstrap the substrate controller.",
 )
 @click.pass_context
 def juju_init(ctx):
-    # health checks before creds
+    substrate = ctx.obj["substrate"]
     maas_vm_name = _ctx_maas_vm_name(ctx.obj)
     verify_lxd(ctx.obj["lxdbridge"])
-    verify_maas(ctx.obj["admin"], maas_vm_name=maas_vm_name)
-    _wait_for_vm_host_architecture(
-        ctx.obj["admin"],
-        ctx.obj["vmhost"],
-        REQUIRED_BOOT_ARCHITECTURE,
-        maas_vm_name=maas_vm_name,
-    )
-    # juju install + creds/cloud
+
     ensure_snap("juju")
-    api_key = maas_api_key(ctx.obj["admin"], maas_vm_name=maas_vm_name)
-    write_cloud_yaml(_ctx_maas_vm_ip(ctx.obj) if maas_vm_name else ctx.obj["ip"])
-    write_cred_yaml(api_key)
-    bootstrapped = juju_onboard()
+    if _is_maas_substrate(substrate):
+        # health checks before creds
+        verify_maas(ctx.obj["admin"], maas_vm_name=maas_vm_name)
+        _wait_for_vm_host_architecture(
+            ctx.obj["admin"],
+            ctx.obj["vmhost"],
+            REQUIRED_BOOT_ARCHITECTURE,
+            maas_vm_name=maas_vm_name,
+        )
+        api_key = maas_api_key(ctx.obj["admin"], maas_vm_name=maas_vm_name)
+        write_cloud_yaml(_ctx_maas_vm_ip(ctx.obj) if maas_vm_name else ctx.obj["ip"])
+        write_cred_yaml(api_key)
+
+    bootstrapped = juju_onboard(substrate)
     if bootstrapped:
         click.echo("juju initialized and controller bootstrapped.")
     else:
         click.echo("juju already initialized.")
 
 
+def _ensure_model_for_substrate(substrate: str) -> None:
+    controller = _controller_name(substrate)
+    constraint = _model_constraint(substrate)
+    _ensure_juju_model(CEPHTOOLS_MODEL, controller=controller, constraint=constraint)
+    if constraint:
+        click.echo(
+            f"Juju model '{CEPHTOOLS_MODEL}' ensured with constraint {constraint}."
+        )
+    else:
+        click.echo(f"Juju model '{CEPHTOOLS_MODEL}' ensured.")
+
+
 @cli.command(
     "install",
-    help="Run all installation steps: install-deps, lxd-init, maas-init, register-vm-host, configure-network, juju-init, create-model.",
+    help="Run all installation steps for the selected substrate.",
 )
 @click.pass_context
 def install(ctx):
     """Run all testenv installation steps in sequence."""
     install_fault_handlers("install")
     emit("Starting full testenv installation...")
+    substrate = ctx.obj["substrate"]
 
-    click.echo("\n=== Step 1/7: Installing dependencies ===")
-    with operation("1/7", "install-deps"):
-        ctx.invoke(install_deps)
+    if substrate == SUBSTRATE_LXD:
+        steps = [
+            (
+                "install-deps",
+                "Installing dependencies",
+                lambda: ctx.invoke(install_deps),
+            ),
+            ("lxd-init", "Initializing LXD", lambda: ctx.invoke(lxd_init_cmd)),
+            ("juju-init", "Initializing Juju", lambda: ctx.invoke(juju_init)),
+            (
+                "create-model",
+                "Creating Juju model",
+                lambda: _ensure_model_for_substrate(substrate),
+            ),
+            (
+                "configure-network",
+                "Configuring network",
+                lambda: ctx.invoke(configure_network),
+            ),
+        ]
+    else:
+        steps = [
+            (
+                "install-deps",
+                "Installing dependencies",
+                lambda: ctx.invoke(install_deps),
+            ),
+            ("lxd-init", "Initializing LXD", lambda: ctx.invoke(lxd_init_cmd)),
+            ("maas-init", "Initializing MAAS", lambda: ctx.invoke(maas_init_cmd)),
+            (
+                "register-vm-host",
+                "Registering VM host",
+                lambda: ctx.invoke(register_vm_host),
+            ),
+            (
+                "configure-network",
+                "Configuring network",
+                lambda: ctx.invoke(configure_network),
+            ),
+            ("juju-init", "Initializing Juju", lambda: ctx.invoke(juju_init)),
+            (
+                "create-model",
+                "Creating Juju model",
+                lambda: _ensure_model_for_substrate(substrate),
+            ),
+        ]
 
-    click.echo("\n=== Step 2/7: Initializing LXD ===")
-    with operation("2/7", "lxd-init"):
-        ctx.invoke(lxd_init_cmd)
-
-    click.echo("\n=== Step 3/7: Initializing MAAS ===")
-    with operation("3/7", "maas-init"):
-        ctx.invoke(maas_init_cmd)
-
-    click.echo("\n=== Step 4/7: Registering VM host ===")
-    with operation("4/7", "register-vm-host"):
-        ctx.invoke(register_vm_host)
-
-    click.echo("\n=== Step 5/7: Configuring network ===")
-    with operation("5/7", "configure-network"):
-        ctx.invoke(configure_network)
-
-    click.echo("\n=== Step 6/7: Initializing Juju ===")
-    with operation("6/7", "juju-init"):
-        ctx.invoke(juju_init)
-
-    click.echo("\n=== Step 7/7: Creating Juju model ===")
-    with operation("7/7", "create-model"):
-        _ensure_juju_model(CEPHTOOLS_MODEL, constraint=f"tags={CEPHTOOLS_TAG}")
-        click.echo(
-            f"Juju model '{CEPHTOOLS_MODEL}' ensured with constraint tags={CEPHTOOLS_TAG}."
-        )
+    total = len(steps)
+    for index, (name, title, action) in enumerate(steps, start=1):
+        step = f"{index}/{total}"
+        click.echo(f"\n=== Step {step}: {title} ===")
+        with operation(step, name):
+            action()
 
     click.echo("\n=== Installation complete! ===")
-    click.echo(f"MAAS URL: {ctx.obj['maas_url']}")
-    click.echo(f"Admin user: {ctx.obj['admin']}")
+    click.echo(f"Substrate: {substrate}")
+    click.echo(f"Controller: {_controller_name(substrate)}")
+    if _is_maas_substrate(substrate):
+        click.echo(f"MAAS URL: {ctx.obj['maas_url']}")
+        click.echo(f"Admin user: {ctx.obj['admin']}")
     click.echo("You can now use 'juju status' to check your controller.")
     mark_complete()
 

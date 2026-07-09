@@ -64,7 +64,7 @@ Reserve a machine and automatically deploy `cephtools` and its test environment 
 cephtools testflinger deploy [QUEUE_NAME] \
     --launchpad-account <ssh-key-ref> \
     --reserve-for <seconds> \
-    --testenv-args "--maas-mode vm"
+    --testenv-args "--substrate maas-vm"
 ```
 
 This command:
@@ -95,20 +95,26 @@ This is a thin wrapper around `testflinger cancel <job-id>`.
 
 ## Testenv bootstrap (`cephtools testenv`)
 
-Use `cephtools testenv` to stand up or manage a local MAAS/LXD/Juju lab for test environment development. 
+Use `cephtools testenv` to stand up or manage a local MAAS/LXD/Juju lab for test environment development.
 
-- `cephtools testenv install`: runs the full workflow: install MAAS from deb packages plus PostgreSQL, initialise LXD, bring up MAAS, register the LXD VM host, configure networking, bootstrap Juju, and ensure the default model exists.
+The substrate is selected with `--substrate`:
+
+- `maas-host` (default): install MAAS on the host and use MAAS to compose LXD VMs.
+- `maas-vm`: run MAAS inside an isolated LXD VM and use MAAS to compose LXD VMs.
+- `lxd`: skip MAAS entirely, bootstrap Juju on the local LXD cloud, create an `ext` LXD network, expose it as the Juju `external` space, and provision OSD block devices as LXD custom block volumes attached to Juju LXD VMs.
+
+- `cephtools testenv install`: runs the workflow for the selected substrate and ensures the default Juju model exists.
 
 Below are the individual steps:
 
-- `cephtools testenv install-deps`: installs MAAS from the configured deb PPA, PostgreSQL, the required LXD/Terraform snaps, and Terragrunt, then checks LXD is ready.
-- `cephtools testenv lxd-init`:runs the non-interactive LXD initialisation using the configured bridge.
-- `cephtools testenv maas-init`: restarts the resolver and runs DNS preflight checks, configures PostgreSQL-backed MAAS, creates/logs in the admin user, re-checks DNS, and writes `cloud.yaml`.
-- `cephtools testenv register-vm-host` registers the local LXD as a VM host in MAAS and kicks off boot-resource imports.
-- `cephtools testenv configure-network` : configures the default VLAN in MAAS (gateway, DHCP range, space) and records the details `state/network.yaml`.
-- `cephtools testenv ensure-nodes`: reconciles the VM inventory via Terragrunt; override the number of VMs and attached data disks with `--vm-count`, `--vm-data-disk-count`, and `--vm-data-disk-size`.
-- `cephtools testenv cleanup`: best-effort cleanup for testenv-managed lab resources and generated state. By default it destroys Terragrunt-managed nodes, kills the Juju controller, removes the configured MAAS VM host, deletes known transient LXD instances such as `warmup-vm`, and removes generated state files (`cloud.yaml`, `cred.yaml`, `network.yaml`). `ensure-nodes.hcl` is removed only after node cleanup succeeds or there is no node state left to preserve. By default the command preserves the installed MAAS/LXD/Juju/Terraform toolchain and `state/cephtools.yaml`; add `--purge-installed` for maximum isolation to also remove the testenv-installed toolchain (MAAS, PostgreSQL, LXD, Juju, Terraform, Terragrunt, local Juju state, LXD installer stubs, and related residual directories).
-- `cephtools testenv juju-init`: verifies MAAS/LXD health, installs Juju, writes credentials, onboards the cloud, and bootstraps the controller.
+- `cephtools testenv install-deps`: installs the substrate dependencies. MAAS substrates install MAAS/Terraform/Terragrunt as needed; the LXD substrate installs only LXD and Juju.
+- `cephtools testenv lxd-init`: runs non-interactive LXD initialisation. In LXD substrate mode it creates both the normal bridge and the `ext` bridge with LXD-managed DHCP/DNS.
+- `cephtools testenv maas-init`: MAAS-only; configures MAAS and writes MAAS cloud state.
+- `cephtools testenv register-vm-host`: MAAS-only; registers local LXD as a MAAS VM host and kicks off boot-resource imports.
+- `cephtools testenv configure-network`: configures MAAS VLANs/spaces on MAAS substrates. In LXD substrate mode it runs `juju reload-spaces`, creates/moves the `external` space for `ext`, and records reduced network details in `state/network.yaml`.
+- `cephtools testenv ensure-nodes`: reconciles the VM inventory. MAAS substrates use Terragrunt/MAAS; the LXD substrate adds Juju LXD VM machines and attaches LXD custom block volumes for OSD disks. Override with `--vm-count`, `--vm-data-disk-count`, and `--vm-data-disk-size`.
+- `cephtools testenv cleanup`: best-effort cleanup for testenv-managed lab resources and generated state. On MAAS substrates it destroys Terragrunt-managed nodes, kills the Juju controller, removes the configured MAAS VM host, deletes known transient LXD instances such as `warmup-vm`, and removes generated state files (`cloud.yaml`, `cred.yaml`, `network.yaml`). On the LXD substrate it kills `lxd-controller`, removes generated state, and deletes matching LXD OSD block volumes. By default the command preserves the installed toolchain and `state/cephtools.yaml`; add `--purge-installed` for maximum isolation.
+- `cephtools testenv juju-init`: verifies LXD/MAAS health as applicable, installs Juju, and bootstraps the selected substrate controller (`maas-controller` or `lxd-controller`).
 
 Examples:
 

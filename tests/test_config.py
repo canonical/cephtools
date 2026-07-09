@@ -81,6 +81,66 @@ def test_load_testenv_defaults_overrides_from_config(state_home: Path) -> None:
     assert defaults == expected
 
 
+def test_load_testenv_defaults_rejects_legacy_maas_mode(state_home: Path) -> None:
+    cfg_path = state_home / config.CONFIG_FILENAME
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "cephtools:",
+                "  testenv:",
+                "    maas_mode: vm",
+                "",
+            ]
+        )
+    )
+
+    with pytest.raises(config.click.ClickException) as excinfo:
+        config.load_testenv_defaults()
+
+    assert "testenv.substrate" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("substrate", config.TESTENV_SUBSTRATES)
+def test_load_testenv_defaults_accepts_substrates(
+    state_home: Path, substrate: str
+) -> None:
+    cfg_path = state_home / config.CONFIG_FILENAME
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "cephtools:",
+                "  testenv:",
+                f"    substrate: {substrate}",
+                "",
+            ]
+        )
+    )
+
+    assert config.load_testenv_defaults()["substrate"] == substrate
+
+
+def test_load_testenv_defaults_rejects_invalid_substrate(state_home: Path) -> None:
+    cfg_path = state_home / config.CONFIG_FILENAME
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "cephtools:",
+                "  testenv:",
+                "    substrate: maas",
+                "",
+            ]
+        )
+    )
+
+    with pytest.raises(config.click.ClickException) as excinfo:
+        config.load_testenv_defaults()
+
+    assert "testenv.substrate" in str(excinfo.value)
+
+
 def test_load_testenv_defaults_rejects_legacy_maas_ch(state_home: Path) -> None:
     cfg_path = state_home / config.CONFIG_FILENAME
     cfg_path.parent.mkdir(parents=True, exist_ok=True)

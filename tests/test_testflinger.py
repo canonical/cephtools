@@ -384,8 +384,8 @@ def test_build_deploy_script() -> None:
 
 
 def test_build_deploy_script_includes_testenv_args() -> None:
-    script = build_deploy_script("--maas-mode vm")
-    assert script.strip().endswith("cephtools testenv --maas-mode vm install")
+    script = build_deploy_script("--substrate maas-vm")
+    assert script.strip().endswith("cephtools testenv --substrate maas-vm install")
 
 
 def test_build_deploy_script_quotes_testenv_args() -> None:
