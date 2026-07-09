@@ -974,38 +974,46 @@ def test_dns_preflight_raises_when_unresolved(monkeypatch):
     assert "resolvectl status || true" in commands
 
 
-def test_configure_lxd_juju_network_writes_reduced_network_yaml(
-    monkeypatch: pytest.MonkeyPatch, state_home: Path
-) -> None:
+def _fake_lxd_network(network_name: str):
+    if network_name == "lxdbr0":
+        return "10.10.0.0/24", "10.10.0.1"
+    if network_name == testenv.EXT_LXD_NETWORK:
+        return "10.20.0.0/24", "10.20.0.1"
+    raise AssertionError(network_name)
+
+
+def _run_configure_lxd_juju_network(monkeypatch, spaces_json: str):
     calls: list[object] = []
 
     def fake_run(cmd, check=True, shell=False, quiet=False):
         calls.append((cmd, check))
 
         class Result:
-            stdout = ""
+            stdout = spaces_json if cmd[:2] == ["juju", "spaces"] else ""
             returncode = 0
 
         return Result()
 
-    def fake_lxd_network(network_name: str):
-        if network_name == "lxdbr0":
-            return "10.10.0.0/24", "10.10.0.1"
-        if network_name == testenv.EXT_LXD_NETWORK:
-            return "10.20.0.0/24", "10.20.0.1"
-        raise AssertionError(network_name)
-
     monkeypatch.setattr(testenv, "run", fake_run)
-    monkeypatch.setattr(testenv, "lxd_network_cidr_and_gateway", fake_lxd_network)
+    monkeypatch.setattr(testenv, "lxd_network_cidr_and_gateway", _fake_lxd_network)
 
     testenv.configure_lxd_juju_network(
         controller=testenv.LXD_CONTROLLER, model="cephtools", lxdbridge="lxdbr0"
     )
+    return calls
+
+
+def test_configure_lxd_juju_network_writes_reduced_network_yaml(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path
+) -> None:
+    # ext subnet not yet assigned to the external space -> move-to-space runs.
+    calls = _run_configure_lxd_juju_network(monkeypatch, spaces_json="{}")
 
     model_ref = f"{testenv.LXD_CONTROLLER}:cephtools"
     assert calls == [
         (["juju", "reload-spaces", "-m", model_ref], True),
         (["juju", "add-space", testenv.EXTERNAL_SPACE_NAME, "-m", model_ref], False),
+        (["juju", "spaces", "--format", "json", "-m", model_ref], True),
         (
             [
                 "juju",
@@ -1030,6 +1038,31 @@ def test_configure_lxd_juju_network_writes_reduced_network_yaml(
         "    gateway: 10.20.0.1\n"
         "    space: external\n"
     )
+
+
+def test_configure_lxd_juju_network_is_idempotent_when_subnet_already_moved(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path
+) -> None:
+    # ext subnet already in the external space -> move-to-space is skipped, so a
+    # repeated install/configure-network run does not abort.
+    spaces_json = json.dumps(
+        {
+            "spaces": [
+                {"name": "alpha", "subnets": {"10.10.0.0/24": {}}},
+                {
+                    "name": testenv.EXTERNAL_SPACE_NAME,
+                    "subnets": {"10.20.0.0/24": {}},
+                },
+            ]
+        }
+    )
+    calls = _run_configure_lxd_juju_network(monkeypatch, spaces_json=spaces_json)
+
+    move_calls = [
+        cmd for (cmd, _check) in calls if cmd[:2] == ["juju", "move-to-space"]
+    ]
+    assert move_calls == []
+    assert (state_home / "network.yaml").exists()
 
 
 def test_create_lxd_nodes_impl_adds_machines_and_block_volumes(

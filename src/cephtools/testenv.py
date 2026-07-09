@@ -2079,13 +2079,40 @@ def write_lxd_network_yaml(
     return network_path
 
 
+def _juju_subnet_space(model_ref: str, cidr: str) -> str | None:
+    """Return the Juju space a subnet CIDR is currently assigned to, if any."""
+    result = run(
+        ["juju", "spaces", "--format", "json", "-m", model_ref],
+        quiet=True,
+    )
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
+        raise click.ClickException("Failed to parse Juju spaces output.") from exc
+    spaces = payload.get("spaces")
+    if not isinstance(spaces, list):
+        return None
+    for space in spaces:
+        if not isinstance(space, dict):
+            continue
+        subnets = space.get("subnets")
+        if isinstance(subnets, dict) and cidr in subnets:
+            name = space.get("name")
+            return str(name) if name is not None else None
+    return None
+
+
 def configure_lxd_juju_network(*, controller: str, model: str, lxdbridge: str) -> None:
     lxd_cidr, lxd_gateway = lxd_network_cidr_and_gateway(lxdbridge)
     ext_cidr, ext_gateway = lxd_network_cidr_and_gateway(EXT_LXD_NETWORK)
     model_ref = _juju_model_ref(controller, model)
     run(["juju", "reload-spaces", "-m", model_ref])
     run(["juju", "add-space", EXTERNAL_SPACE_NAME, "-m", model_ref], check=False)
-    run(["juju", "move-to-space", EXTERNAL_SPACE_NAME, ext_cidr, "-m", model_ref])
+    # move-to-space is not a no-op when the subnet is already in the target
+    # space, so only move it when it is not already assigned there. This keeps
+    # configure-network idempotent across repeated install runs.
+    if _juju_subnet_space(model_ref, ext_cidr) != EXTERNAL_SPACE_NAME:
+        run(["juju", "move-to-space", EXTERNAL_SPACE_NAME, ext_cidr, "-m", model_ref])
     write_lxd_network_yaml(
         lxdbridge=lxdbridge,
         lxd_cidr=lxd_cidr,
