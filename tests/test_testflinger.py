@@ -10,6 +10,7 @@ from click import ClickException
 from click.testing import CliRunner
 
 import cephtools.config as config_module
+import cephtools.testflinger as testflinger
 from cephtools.config import DEFAULT_TERRAFORM_ROOT, load_cephtools_config
 from cephtools.testflinger import (
     BackendConfig,
@@ -455,6 +456,238 @@ def test_perform_remote_deploy_failure() -> None:
             "echo hi",
             runner=failing_runner,
         )
+
+
+def _mk_details(job_id: str, ip: str = "10.0.0.2") -> ReservationDetails:
+    return ReservationDetails(
+        job_id=job_id,
+        queue_name="ceph-qa-1",
+        user="ubuntu",
+        ip=ip,
+        expires_at=dt.datetime(2024, 10, 16, 16, 0, 0),
+        timeout_seconds=1800,
+    )
+
+
+def _raise_click(message: str) -> None:
+    raise ClickException(message)
+
+
+def _install_deploy_fakes(monkeypatch, *, perform_behaviour):
+    """Monkeypatch the sub-steps of deploy_with_retries for loop testing.
+
+    ``perform_behaviour`` is a list of callables, one per expected
+    ``perform_remote_deploy`` invocation; each receives the job_id and may raise.
+    Returns dicts capturing submit/await/perform/cancel calls.
+    """
+    submit_calls: list[str] = []
+    await_calls: list[str] = []
+    perform_calls: list[str] = []
+    cancel_calls: list[str] = []
+
+    def fake_submit(config, queue, rf, *, runner, testflinger_bin):
+        jid = f"job-{len(submit_calls) + 1}"
+        submit_calls.append(jid)
+        return jid
+
+    def fake_await(*, queue_name, job_id, testflinger_bin, echo):
+        await_calls.append(job_id)
+        return _mk_details(job_id, ip=f"10.0.0.{len(await_calls) + 1}")
+
+    perform_iter = iter(perform_behaviour)
+
+    def fake_perform(*, details, script, runner):
+        perform_calls.append(details.job_id)
+        next(perform_iter)(details.job_id)
+
+    def fake_cancel(*, job_id, runner, testflinger_bin):
+        cancel_calls.append(job_id)
+
+    monkeypatch.setattr(testflinger, "submit_reserve_job", fake_submit)
+    monkeypatch.setattr(testflinger, "await_reservation_details", fake_await)
+    monkeypatch.setattr(testflinger, "perform_remote_deploy", fake_perform)
+    monkeypatch.setattr(testflinger, "cancel_reservation", fake_cancel)
+    monkeypatch.setattr(testflinger, "print_reservation_summary", lambda *a, **k: None)
+    return {
+        "submit": submit_calls,
+        "await": await_calls,
+        "perform": perform_calls,
+        "cancel": cancel_calls,
+    }
+
+
+def _no_op_runner(**_kwargs: Any):
+    raise AssertionError("runner should not be called directly by deploy_with_retries")
+
+
+def test_deploy_with_retries_success_first_attempt(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path
+) -> None:
+    calls = _install_deploy_fakes(
+        monkeypatch,
+        perform_behaviour=[lambda _jid: None],  # succeeds immediately
+    )
+    echo: list[str] = []
+
+    details = testflinger.deploy_with_retries(
+        queue_name="ceph-qa-1",
+        reserve_for=600,
+        config=BackendConfig("lp:tester"),
+        testenv_args="",
+        testflinger_bin="tf",
+        max_attempts=2,
+        runner=_no_op_runner,
+        echo=echo.append,
+    )
+
+    assert details.job_id == "job-1"
+    assert calls["submit"] == ["job-1"]
+    assert calls["perform"] == ["job-1"]
+    assert calls["cancel"] == []  # no cancellation on success
+    assert load_latest_reservation_job_id() == "job-1"
+
+
+def test_deploy_with_retries_succeeds_on_second_attempt(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path
+) -> None:
+    calls = _install_deploy_fakes(
+        monkeypatch,
+        perform_behaviour=[
+            lambda _jid: _raise_click("Remote deployment failed with exit code 1."),
+            lambda _jid: None,  # second attempt succeeds
+        ],
+    )
+    echo: list[str] = []
+
+    details = testflinger.deploy_with_retries(
+        queue_name="ceph-qa-1",
+        reserve_for=600,
+        config=BackendConfig("lp:tester"),
+        testenv_args="",
+        testflinger_bin="tf",
+        max_attempts=2,
+        runner=_no_op_runner,
+        echo=echo.append,
+    )
+
+    assert details.job_id == "job-2"
+    assert calls["submit"] == ["job-1", "job-2"]
+    assert calls["perform"] == ["job-1", "job-2"]
+    assert calls["cancel"] == ["job-1"]  # failed attempt's reservation cancelled
+    assert load_latest_reservation_job_id() == "job-2"
+    assert any("Retrying with a fresh reservation" in m for m in echo)
+
+
+def test_deploy_with_retries_all_attempts_fail(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path
+) -> None:
+    def always_fail(_jid):
+        raise ClickException("Remote deployment failed with exit code 1.")
+
+    calls = _install_deploy_fakes(
+        monkeypatch, perform_behaviour=[always_fail, always_fail]
+    )
+
+    with pytest.raises(ClickException, match="Deploy failed after 2 attempt"):
+        testflinger.deploy_with_retries(
+            queue_name="ceph-qa-1",
+            reserve_for=600,
+            config=BackendConfig("lp:tester"),
+            testenv_args="",
+            testflinger_bin="tf",
+            max_attempts=2,
+            runner=_no_op_runner,
+            echo=lambda _m: None,
+        )
+
+    assert calls["cancel"] == ["job-1", "job-2"]  # each failed attempt cancelled
+
+
+def test_deploy_with_retries_cancels_when_await_fails(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path
+) -> None:
+    # submit succeeds (job_id known), but await fails -> details is None, yet we
+    # must still cancel the in-flight job.
+    monkeypatch.setattr(
+        testflinger,
+        "submit_reserve_job",
+        lambda *a, **k: "job-1",
+    )
+    monkeypatch.setattr(
+        testflinger,
+        "await_reservation_details",
+        lambda **k: _raise_click("Failed to identify reservation details."),
+    )
+    perform_calls: list[str] = []
+    monkeypatch.setattr(
+        testflinger,
+        "perform_remote_deploy",
+        lambda *, details, script, runner: perform_calls.append(details.job_id),
+    )
+    cancel_calls: list[str] = []
+    monkeypatch.setattr(
+        testflinger,
+        "cancel_reservation",
+        lambda *, job_id, runner, testflinger_bin: cancel_calls.append(job_id),
+    )
+    monkeypatch.setattr(testflinger, "print_reservation_summary", lambda *a, **k: None)
+
+    with pytest.raises(ClickException, match="Deploy failed after 1 attempt"):
+        testflinger.deploy_with_retries(
+            queue_name="ceph-qa-1",
+            reserve_for=600,
+            config=BackendConfig("lp:tester"),
+            testenv_args="",
+            testflinger_bin="tf",
+            max_attempts=1,
+            runner=_no_op_runner,
+            echo=lambda _m: None,
+        )
+
+    assert perform_calls == []  # never got that far
+    assert cancel_calls == ["job-1"]  # job_id was known before await failed
+
+
+def test_deploy_with_retries_rejects_zero_attempts() -> None:
+    with pytest.raises(ClickException, match="must be a positive integer"):
+        testflinger.deploy_with_retries(
+            queue_name="ceph-qa-1",
+            reserve_for=600,
+            config=BackendConfig("lp:tester"),
+            testenv_args="",
+            testflinger_bin="tf",
+            max_attempts=0,
+            runner=_no_op_runner,
+            echo=lambda _m: None,
+        )
+
+
+def test_deploy_cli_passes_max_attempts(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(
+        "cephtools.testflinger.ensure_backend_config",
+        lambda *a, **k: (BackendConfig("lp:tester"), False),
+    )
+    monkeypatch.setattr(
+        "cephtools.testflinger._ssh_key_reference_warning", lambda v: None
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_deploy(**kwargs: Any) -> ReservationDetails:
+        captured.update(kwargs)
+        return _mk_details("job-1")
+
+    monkeypatch.setattr("cephtools.testflinger.deploy_with_retries", fake_deploy)
+
+    result = runner.invoke(
+        cli,
+        ["deploy", "ceph-qa-1", "--max-attempts", "3", "--testflinger-bin", "tf"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["max_attempts"] == 3
 
 
 def test_read_testenv_network_config(tmp_path: Path) -> None:
