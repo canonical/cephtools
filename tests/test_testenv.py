@@ -2142,7 +2142,9 @@ def test_cleanup_cli_keep_nodes_preserves_terragrunt_inputs(
         or testenv.CleanupPhaseResult("remove terragrunt inputs", "ok", "removed"),
     )
 
-    result = runner.invoke(testenv.cli, ["cleanup", "--keep-nodes"])
+    result = runner.invoke(
+        testenv.cli, ["--substrate", "maas-host", "cleanup", "--keep-nodes"]
+    )
 
     assert result.exit_code == 0
     assert calls == ["state-files"]
@@ -2196,7 +2198,9 @@ def test_cleanup_cli_best_effort_reports_failures(
         or testenv.CleanupPhaseResult("remove terragrunt inputs", "ok", "removed"),
     )
 
-    result = runner.invoke(testenv.cli, ["cleanup"])
+    result = runner.invoke(
+        testenv.cli, ["--substrate", "maas-host", "cleanup"]
+    )
 
     assert calls == [
         "nodes",
@@ -2324,7 +2328,9 @@ def test_cleanup_cli_purge_installed_runs_extended_phases(
         or testenv.CleanupPhaseResult(phase, "ok", "removed"),
     )
 
-    result = runner.invoke(testenv.cli, ["cleanup", "--purge-installed"])
+    result = runner.invoke(
+        testenv.cli, ["--substrate", "maas-host", "cleanup", "--purge-installed"]
+    )
 
     assert result.exit_code == 0
     assert calls == [
@@ -2479,7 +2485,9 @@ def test_cleanup_cli_purge_installed_removes_terragrunt_inputs_after_node_failur
         lambda phase, paths: testenv.CleanupPhaseResult(phase, "ok", "removed"),
     )
 
-    result = runner.invoke(testenv.cli, ["cleanup", "--purge-installed"])
+    result = runner.invoke(
+        testenv.cli, ["--substrate", "maas-host", "cleanup", "--purge-installed"]
+    )
 
     assert result.exit_code == 1
     assert calls == ["nodes", "terragrunt-inputs"]

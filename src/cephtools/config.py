@@ -33,7 +33,7 @@ _TESTENV_DEFAULTS_FALLBACK: dict[str, Any] = {
     "admin_mail": "admin@example.com",
     "lxdbridge": "lxdbr0",
     "maas_lxdbridge": "maasbr0",
-    "substrate": "maas-host",
+    "substrate": "lxd",
     "maas_vm_name": "maas-vm",
     "maas_vm_cpus": 8,
     "maas_vm_memory": "16GiB",

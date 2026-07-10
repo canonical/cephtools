@@ -99,9 +99,9 @@ Use `cephtools testenv` to stand up or manage a local MAAS/LXD/Juju lab for test
 
 The substrate is selected with `--substrate`:
 
-- `maas-host` (default): install MAAS on the host and use MAAS to compose LXD VMs.
+- `lxd` (default): skip MAAS entirely, bootstrap Juju on the local LXD cloud, create an `ext` LXD network, expose it as the Juju `external` space, and provision OSD block devices as LXD custom block volumes attached to Juju LXD VMs.
+- `maas-host`: install MAAS on the host and use MAAS to compose LXD VMs.
 - `maas-vm`: run MAAS inside an isolated LXD VM and use MAAS to compose LXD VMs.
-- `lxd`: skip MAAS entirely, bootstrap Juju on the local LXD cloud, create an `ext` LXD network, expose it as the Juju `external` space, and provision OSD block devices as LXD custom block volumes attached to Juju LXD VMs.
 
 - `cephtools testenv install`: runs the workflow for the selected substrate and ensures the default Juju model exists.
 
