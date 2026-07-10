@@ -50,27 +50,13 @@ Host
    - Host-level bind9 should not be installed or configured for testenv.
    - Host-level LXD dnsmasq should only serve the host LXD network.
 
-## New configuration
+## Runtime choices and fixed conventions
 
-Add testenv defaults for the isolated mode.
+There is no persistent general testenv configuration. Select the isolated mode with `--substrate maas-vm`. Meaningful test variations remain CLI-only: `--maas-version`, `--maas-vm-cpus`, `--maas-vm-memory`, `--maas-vm-disk`, and `--maas-vm-image`.
 
-Suggested config keys:
+Disposable-lab names and topology are fixed in code: `lxdbr0` is the normal host network, `maasbr0` is the MAAS-owned network, the bootstrap VM is `maas-vm`, its LXD project is `maas`, and the MAAS VM host is `local-lxd`. The MAAS VM address is derived from `maasbr0`.
 
-```yaml
-testenv:
-  maas_mode: vm              # existing/direct-host vs vm
-  lxdbridge: lxdbr0          # normal host LXD network
-  maas_lxdbridge: maasbr0    # MAAS-owned network
-  maas_vm_name: maas-vm
-  maas_vm_cpus: 8
-  maas_vm_memory: 16GiB
-  maas_vm_disk: 80GiB
-  maas_vm_ip: null           # optional; derive from maasbr0 if unset
-  maas_vm_image: ubuntu:24.04
-  vmhost_name: local-lxd
-```
-
-Potentially keep the existing host-installed MAAS path as `maas_mode: host` until the VM mode is stable.
+The host-installed path remains available as `--substrate maas-host`; the default substrate is `lxd`.
 
 ## Implementation plan
 
@@ -275,7 +261,7 @@ Use a fresh Testflinger node or fresh VM for each full integration test.
 
 Add tests for:
 
-- VM-mode config defaults;
+- MAAS-VM substrate CLI defaults and fixed conventions;
 - host network creation leaves DNS/DHCP enabled;
 - MAAS network creation disables DNS/DHCP;
 - generated MAAS VM bootstrap script;
@@ -287,7 +273,7 @@ Add tests for:
 
 Run on a fresh machine:
 
-1. `cephtools testenv install --maas-mode vm`;
+1. `cephtools testenv --substrate maas-vm install`;
 2. verify host LXD default network resolves normal LXD instances;
 3. verify MAAS VM services are active;
 4. verify MAAS DHCP/DNS is active on `maasbr0`;
@@ -317,12 +303,11 @@ Expected:
 
 ## Migration strategy
 
-1. Add VM-mode code paths behind a config flag/CLI option.
-2. Keep existing host-mode behavior as the default initially.
-3. Add unit tests for both modes.
-4. Validate VM mode manually on fresh Testflinger nodes.
-5. Switch default to VM mode only after repeated successful end-to-end runs.
-6. Eventually deprecate host-mode if VM mode proves reliable.
+1. Select VM mode explicitly with `--substrate maas-vm`.
+2. Keep `maas-host` available for comparison and regression testing.
+3. Keep `lxd` as the default substrate.
+4. Validate MAAS VM mode manually on fresh Testflinger nodes.
+5. Deprecate `maas-host` only after repeated successful end-to-end MAAS VM runs.
 
 ## Open questions
 

@@ -12,18 +12,12 @@ from typing import Callable, Iterable
 
 import click
 
-from cephtools.config import (
-    DEFAULT_TESTFLINGER_CONFIG_PATH,
-    DEFAULT_TESTFLINGER_DEPLOY_RESERVE_FOR,
-    DEFAULT_TESTFLINGER_RESERVE_FOR,
-    load_nested_yaml,
-)
-from cephtools.state import get_state_file
+from cephtools.state import get_state_file, load_nested_yaml
 
 
-DEFAULT_CONFIG_PATH = DEFAULT_TESTFLINGER_CONFIG_PATH
-DEFAULT_RESERVE_FOR = DEFAULT_TESTFLINGER_RESERVE_FOR
-DEFAULT_DEPLOY_RESERVE_FOR = DEFAULT_TESTFLINGER_DEPLOY_RESERVE_FOR
+DEFAULT_CONFIG_PATH = get_state_file("testflinger.yaml", ensure_parent=False)
+DEFAULT_RESERVE_FOR = 21600
+DEFAULT_DEPLOY_RESERVE_FOR = 21600
 LATEST_RESERVATION_STATE_FILENAME = "testflinger-latest.yaml"
 
 RESERVATION_PREFIXES = [
@@ -615,6 +609,103 @@ def perform_remote_deploy(
         )
 
 
+def _best_effort_cancel(
+    job_id: str,
+    testflinger_bin: str,
+    runner: Runner,
+    echo: Callable[[str], None],
+) -> None:
+    """Cancel a reservation, swallowing errors so a retry loop can continue."""
+    try:
+        cancel_reservation(
+            job_id=job_id, runner=runner, testflinger_bin=testflinger_bin
+        )
+        echo(f"Cancelled reservation {job_id}.")
+    except click.ClickException as exc:
+        echo(f"Best-effort cancel of {job_id} failed: {exc.message}")
+
+
+def deploy_with_retries(
+    *,
+    queue_name: str,
+    reserve_for: int,
+    config: BackendConfig,
+    testenv_args: str,
+    testflinger_bin: str,
+    max_attempts: int,
+    runner: Runner,
+    echo: Callable[[str], None],
+) -> ReservationDetails:
+    """Reserve a queue and deploy testenv, retrying the whole job on failure.
+
+    Each failed attempt cancels its in-flight reservation (best-effort) so the
+    queue is freed before re-submitting. A full re-reserve is used rather than
+    reusing the host, because a bad host is a likely failure mode (e.g. a MAAS
+    that cannot sync boot resources). After ``max_attempts`` failures the last
+    error is re-raised.
+    """
+    if max_attempts < 1:
+        raise click.ClickException("--max-attempts must be a positive integer.")
+    script = build_deploy_script(testenv_args)
+    last_exc: click.ClickException | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        echo(f"Deploy attempt {attempt}/{max_attempts}.")
+        job_id: str | None = None
+        details: ReservationDetails | None = None
+        try:
+            job_id = submit_reserve_job(
+                config,
+                queue_name,
+                reserve_for,
+                runner=runner,
+                testflinger_bin=testflinger_bin,
+            )
+            echo(
+                f"Submitted job {job_id} to reserve {queue_name}. Waiting for details."
+            )
+            details = await_reservation_details(
+                queue_name=queue_name,
+                job_id=job_id,
+                testflinger_bin=testflinger_bin,
+                echo=echo,
+            )
+            save_latest_reservation(details)
+            print_reservation_summary(details, testflinger_bin, echo)
+            echo("")
+            echo("Configuring remote environment for testenv deployment.")
+            perform_remote_deploy(details=details, script=script, runner=runner)
+        except click.ClickException as exc:
+            if details is not None:
+                # Preserve queue/ip context for remote-deploy failures.
+                exc = click.ClickException(
+                    f"Failed to deploy testenv on queue {details.queue_name} "
+                    f"({details.ip}): {exc.message}"
+                )
+            last_exc = exc
+            where = f"queue {queue_name}" + (f" ({details.ip})" if details else "")
+            echo(
+                f"Deploy attempt {attempt}/{max_attempts} failed on "
+                f"{where}: {exc.message}"
+            )
+            cancel_job_id = details.job_id if details else job_id
+            if cancel_job_id:
+                _best_effort_cancel(cancel_job_id, testflinger_bin, runner, echo)
+                clear_latest_reservation(cancel_job_id)
+            if attempt < max_attempts:
+                echo("Retrying with a fresh reservation...")
+                continue
+            break
+        echo("Remote deployment succeeded. Testenv should now be installed.")
+        echo(f"Connect with: {_build_ssh_command(details)}")
+        return details
+
+    assert last_exc is not None
+    raise click.ClickException(
+        f"Deploy failed after {max_attempts} attempt(s). Last error: {last_exc.message}"
+    )
+
+
 @click.group()
 def cli() -> None:  # pragma: no cover - exercised via click integration tests
     """Testflinger related helpers."""
@@ -737,6 +828,17 @@ def reserve(  # pragma: no cover - exercised via click integration tests
         "Can also be set with CEPHTOOLS_TESTENV_ARGS."
     ),
 )
+@click.option(
+    "--max-attempts",
+    type=int,
+    default=1,
+    show_default=True,
+    help=(
+        "Number of full reserve+deploy attempts. On failure the in-flight "
+        "reservation is cancelled (best-effort) before retrying with a fresh "
+        "host. Set to >1 to ride out transient or bad-host failures."
+    ),
+)
 def deploy(  # pragma: no cover - exercised via click integration tests
     queue_name: str,
     reserve_for: int,
@@ -746,10 +848,13 @@ def deploy(  # pragma: no cover - exercised via click integration tests
     mattermost_name: str | None,
     testflinger_bin: str,
     testenv_args: str,
+    max_attempts: int,
 ) -> None:
     """Reserve a queue and install cephtools + testenv on it."""
     if reserve_for <= 0:
         raise click.ClickException("--reserve-for must be a positive integer.")
+    if max_attempts < 1:
+        raise click.ClickException("--max-attempts must be a positive integer.")
 
     config, created = ensure_backend_config(
         config_path,
@@ -763,35 +868,16 @@ def deploy(  # pragma: no cover - exercised via click integration tests
     if created:
         return
 
-    details = reserve_node(
+    deploy_with_retries(
         queue_name=queue_name,
         reserve_for=reserve_for,
         config=config,
+        testenv_args=testenv_args,
         testflinger_bin=testflinger_bin,
+        max_attempts=max_attempts,
         runner=subprocess.run,
         echo=click.echo,
     )
-    save_latest_reservation(details)
-
-    print_reservation_summary(details, testflinger_bin, click.echo)
-
-    click.echo("")
-    click.echo("Configuring remote environment for testenv deployment.")
-    script = build_deploy_script(testenv_args)
-    try:
-        perform_remote_deploy(
-            details=details,
-            script=script,
-            runner=subprocess.run,
-        )
-    except click.ClickException as exc:
-        raise click.ClickException(
-            "Failed to deploy testenv on queue "
-            f"{details.queue_name} ({details.ip}): {exc.message}"
-        ) from exc
-
-    click.echo("Remote deployment succeeded. Testenv should now be installed.")
-    click.echo(f"Connect with: {_build_ssh_command(details)}")
 
 
 @cli.command("cancel")

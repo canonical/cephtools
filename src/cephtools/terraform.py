@@ -9,9 +9,9 @@ from typing import Iterable
 import click
 
 from cephtools.common import ensure_snap, run
-from cephtools.config import DEFAULT_TERRAFORM_ROOT, load_cephtools_config
 
 TERRAGRUNT_VERSION = "v0.89.3"
+DEFAULT_TERRAFORM_ROOT = Path("~/src/cephtools/terraform").expanduser()
 
 
 def ensure_terragrunt(
@@ -50,21 +50,6 @@ def ensure_terragrunt(
     run(["sudo", "mv", terragrunt_bin, str(bin_path)])
 
 
-def _extract_config_path(config: dict[str, object], key: str) -> str | None:
-    raw_value: object = config.get(key)
-    if raw_value is None:
-        paths_section = config.get("paths")
-        if isinstance(paths_section, dict):
-            raw_value = paths_section.get(key)
-    if raw_value is None:
-        return None
-    if not isinstance(raw_value, str):
-        raise click.ClickException(
-            f"Configuration value '{key}' must be a string path."
-        )
-    return raw_value
-
-
 def terraform_root_candidates() -> list[Path]:
     """
     Return possible terraform root directories ordered by preference.
@@ -74,13 +59,6 @@ def terraform_root_candidates() -> list[Path]:
     env_root = os.environ.get("CEPHTOOLS_TERRAFORM_ROOT")
     if env_root:
         candidates.append(Path(env_root).expanduser())
-
-    config = load_cephtools_config(ensure=True)
-    config_path = _extract_config_path(config, "terraform_root") if config else None
-    if config_path:
-        candidates.append(Path(config_path).expanduser())
-    else:
-        candidates.append(DEFAULT_TERRAFORM_ROOT)
 
     cwd = Path.cwd()
     parents: Iterable[Path] = (cwd, *cwd.parents)
@@ -118,7 +96,7 @@ def find_terraform_root(*, raise_if_missing: bool = True) -> Path | None:
             "Unable to locate terraform root directory.\n"
             "Checked the following locations:\n"
             f"  - {attempted}\n"
-            "Set 'terraform_root' in cephtools.yaml to override."
+            "Set CEPHTOOLS_TERRAFORM_ROOT to override."
         )
 
     return None
@@ -161,7 +139,7 @@ def resolve_plan_dir(plan: str, *, plan_relative: Path | None = None) -> Path:
         f"Terragrunt plan directory not found for '{plan}'. "
         "Checked locations:\n"
         f"  - {locations}\n"
-        "Set CEPHTOOLS_TERRAFORM_ROOT or update terraform_root in the config."
+        "Set CEPHTOOLS_TERRAFORM_ROOT to override."
     )
 
 
