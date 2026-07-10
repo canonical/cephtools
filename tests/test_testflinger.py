@@ -9,9 +9,7 @@ import pytest
 from click import ClickException
 from click.testing import CliRunner
 
-import cephtools.config as config_module
 import cephtools.testflinger as testflinger
-from cephtools.config import DEFAULT_TERRAFORM_ROOT, load_cephtools_config
 from cephtools.testflinger import (
     BackendConfig,
     ReservationDetails,
@@ -845,39 +843,3 @@ def test_machine_ids_offset_out_of_range(
 def test_machine_ids_invalid_count() -> None:
     with pytest.raises(ClickException):
         machine_ids(0)
-
-
-def test_load_cephtools_config_missing_file(state_home: Path) -> None:
-    config = load_cephtools_config()
-    assert config["terraform_root"] == str(DEFAULT_TERRAFORM_ROOT)
-    assert config["juju_model"] == config_module.DEFAULT_JUJU_MODEL
-    assert config["testenv"] == config_module.DEFAULT_TESTENV_DEFAULTS
-
-
-def test_load_cephtools_config_with_section(state_home: Path) -> None:
-    state_home.mkdir(parents=True, exist_ok=True)
-    config_path = state_home / "cephtools.yaml"
-    config_path.write_text(
-        "cephtools:\n"
-        "  terragrunt_dir: /srv/maas-nodes\n"
-        "  juju_model: custom-model\n"
-        "  paths:\n"
-        "    terragrunt_dir: /ignored\n"
-    )
-
-    config = load_cephtools_config(ensure=True)
-    assert config["terragrunt_dir"] == "/srv/maas-nodes"
-    assert config["paths"] == {"terragrunt_dir": "/ignored"}
-    assert config["juju_model"] == "custom-model"
-    assert config["testenv"] == config_module.DEFAULT_TESTENV_DEFAULTS
-
-
-def test_load_cephtools_config_top_level(state_home: Path) -> None:
-    state_home.mkdir(parents=True, exist_ok=True)
-    config_path = state_home / "cephtools.yaml"
-    config_path.write_text("terragrunt_dir: /srv/custom\n")
-
-    config = load_cephtools_config(ensure=True)
-    assert config["terragrunt_dir"] == "/srv/custom"
-    assert config["juju_model"] == config_module.DEFAULT_JUJU_MODEL
-    assert config["testenv"] == config_module.DEFAULT_TESTENV_DEFAULTS

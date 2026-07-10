@@ -12,18 +12,12 @@ from typing import Callable, Iterable
 
 import click
 
-from cephtools.config import (
-    DEFAULT_TESTFLINGER_CONFIG_PATH,
-    DEFAULT_TESTFLINGER_DEPLOY_RESERVE_FOR,
-    DEFAULT_TESTFLINGER_RESERVE_FOR,
-    load_nested_yaml,
-)
-from cephtools.state import get_state_file
+from cephtools.state import get_state_file, load_nested_yaml
 
 
-DEFAULT_CONFIG_PATH = DEFAULT_TESTFLINGER_CONFIG_PATH
-DEFAULT_RESERVE_FOR = DEFAULT_TESTFLINGER_RESERVE_FOR
-DEFAULT_DEPLOY_RESERVE_FOR = DEFAULT_TESTFLINGER_DEPLOY_RESERVE_FOR
+DEFAULT_CONFIG_PATH = get_state_file("testflinger.yaml", ensure_parent=False)
+DEFAULT_RESERVE_FOR = 21600
+DEFAULT_DEPLOY_RESERVE_FOR = 21600
 LATEST_RESERVATION_STATE_FILENAME = "testflinger-latest.yaml"
 
 RESERVATION_PREFIXES = [

@@ -103,6 +103,8 @@ The substrate is selected with `--substrate`:
 - `maas-host`: install MAAS on the host and use MAAS to compose LXD VMs.
 - `maas-vm`: run MAAS inside an isolated LXD VM and use MAAS to compose LXD VMs.
 
+Testenv uses fixed disposable-lab conventions for resource names, bridges, MAAS credentials, and the `cephtools` Juju model. Meaningful test variations are CLI-only: `--substrate`, `--maas-version`, `--maas-vm-cpus`, `--maas-vm-memory`, `--maas-vm-disk`, and `--maas-vm-image`. There is no general `cephtools.yaml`; legacy files with that name are ignored.
+
 - `cephtools testenv install`: runs the workflow for the selected substrate and ensures the default Juju model exists.
 
 Below are the individual steps:
@@ -113,7 +115,7 @@ Below are the individual steps:
 - `cephtools testenv register-vm-host`: MAAS-only; registers local LXD as a MAAS VM host and kicks off boot-resource imports.
 - `cephtools testenv configure-network`: configures MAAS VLANs/spaces on MAAS substrates. In LXD substrate mode it runs `juju reload-spaces`, creates/moves the `external` space for `ext`, and records reduced network details in `state/network.yaml`.
 - `cephtools testenv ensure-nodes`: reconciles the VM inventory. MAAS substrates use Terragrunt/MAAS; the LXD substrate adds Juju LXD VM machines and attaches LXD custom block volumes for OSD disks. Override with `--vm-count`, `--vm-data-disk-count`, and `--vm-data-disk-size`.
-- `cephtools testenv cleanup`: best-effort cleanup for testenv-managed lab resources and generated state. On MAAS substrates it destroys Terragrunt-managed nodes, kills the Juju controller, removes the configured MAAS VM host, deletes known transient LXD instances such as `warmup-vm`, and removes generated state files (`cloud.yaml`, `cred.yaml`, `network.yaml`). On the LXD substrate it kills `lxd-controller`, removes generated state, and deletes matching LXD OSD block volumes. By default the command preserves the installed toolchain and `state/cephtools.yaml`; add `--purge-installed` for maximum isolation.
+- `cephtools testenv cleanup`: best-effort cleanup for testenv-managed lab resources and generated state. On MAAS substrates it destroys Terragrunt-managed nodes, kills the Juju controller, removes the fixed MAAS VM host, deletes known transient LXD instances such as `warmup-vm`, and removes generated state files (`cloud.yaml`, `cred.yaml`, `network.yaml`). On the LXD substrate it kills `lxd-controller`, removes generated state, and deletes matching LXD OSD block volumes. `--keep-nodes` also preserves the Juju controller on every substrate; this is required for LXD nodes because they cannot survive controller removal. By default the command preserves the installed toolchain; add `--purge-installed` for maximum isolation.
 - `cephtools testenv juju-init`: verifies LXD/MAAS health as applicable, installs Juju, and bootstraps the selected substrate controller (`maas-controller` or `lxd-controller`).
 
 Examples:
@@ -134,15 +136,16 @@ cephtools testenv cleanup --purge-installed
 
 `cleanup` is idempotent and best effort: if a phase has nothing to remove it is reported as skipped, later phases still run after an earlier failure, and the command exits non-zero only after printing the final summary when at least one phase failed. `--purge-installed` is intentionally destructive and cannot be combined with `--keep-*` preservation flags.
 
-Set `CEPHTOOLS_TERRAGRUNT_DIR` or the `terragrunt_dir` key in `cephtools.yaml` to point at your Terragrunt plans if they live outside the repository. The MicroCeph Terragrunt/Terraform module now lives in the
+Set `CEPHTOOLS_TERRAGRUNT_DIR` or `CEPHTOOLS_TERRAFORM_ROOT` to point at plans outside the repository. The MicroCeph Terragrunt/Terraform module now lives in the
 [charm-microceph](https://github.com/canonical/charm-microceph/tree/main/terraform/microceph) repository.
 
 ## MicroCeph helpers (`cephtools microceph`)
 
-Utilities that execute MicroCeph management commands across every unit in a deployment. Node discovery defaults to the `microceph` application machines in the model configured by `juju_model`; pass `--nodes` to override.
+Utilities that execute MicroCeph management commands across every unit in a deployment. Node discovery defaults to the `microceph` application machines in the `cephtools` model; pass `--model` or `--nodes` to override.
 
 `cephtools microceph disk add <args>`: runs `microceph disk add ...` on each node. Combine with:
-- `--nodes <machine-id>` (repeatable) to target specific Juju machine IDs, defaults to all.
+- `--model <model>` to discover units in a model other than `cephtools`.
+- `--nodes <machine-id>` (repeatable) to target specific Juju machine IDs directly.
 - `--dry-run` to print the commands without executing them.
 
 Use `--` to pass in args to the invoked `microceph disk add` command, for instance:

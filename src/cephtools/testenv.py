@@ -3,6 +3,8 @@
 
 import json
 import os
+import re
+import secrets
 import shlex
 import shutil
 import socket
@@ -16,10 +18,6 @@ from pathlib import Path
 import click
 import jubilant
 from cephtools.common import ensure_snap, run
-from cephtools.config import (
-    load_cephtools_config,
-    load_testenv_defaults,
-)
 from cephtools.progress import (
     emit,
     install_fault_handlers,
@@ -34,11 +32,23 @@ from cephtools.testflinger import (
     read_testenv_network_config,
 )
 
-# ---- defaults from configuration -----------------------------------------
-DEFAULTS = load_testenv_defaults()
-
-CEPHTOOLS_TAG = DEFAULTS["maas_tag"]
-CEPHTOOLS_MODEL = load_cephtools_config(ensure=True)["juju_model"]
+# Fixed conventions for disposable test environments.
+DEFAULT_MAAS_VERSION = "3.7"
+DEFAULT_SUBSTRATE = "lxd"
+DEFAULT_MAAS_VM_CPUS = 8
+DEFAULT_MAAS_VM_MEMORY = "16GiB"
+DEFAULT_MAAS_VM_DISK = "80GiB"
+DEFAULT_MAAS_VM_IMAGE = "ubuntu:24.04"
+MAAS_ADMIN = "admin"
+MAAS_ADMIN_PASSWORD = "maaspass"
+MAAS_ADMIN_EMAIL = "admin@example.com"
+LXD_BRIDGE = "lxdbr0"
+MAAS_LXD_BRIDGE = "maasbr0"
+MAAS_VM_NAME = "maas-vm"
+MAAS_LXD_PROJECT = "maas"
+MAAS_VM_HOST = "local-lxd"
+CEPHTOOLS_TAG = "cephtools"
+CEPHTOOLS_MODEL = "cephtools"
 MAAS_CONTROLLER = "maas-controller"
 LXD_CONTROLLER = "lxd-controller"
 REQUIRED_BOOT_ARCHITECTURE = "amd64/generic"
@@ -160,20 +170,6 @@ def _resolve_terragrunt_dir() -> Path:
     candidates: list[Path] = []
     if env_path:
         candidates.append(Path(env_path).expanduser())
-
-    config = load_cephtools_config(ensure=True)
-    if config:
-        raw_config_path: object = config.get("terragrunt_dir")
-        if raw_config_path is None:
-            paths_section = config.get("paths")
-            if isinstance(paths_section, dict):
-                raw_config_path = paths_section.get("terragrunt_dir")
-        if raw_config_path:
-            if not isinstance(raw_config_path, str):
-                raise click.ClickException(
-                    "Configuration value 'terragrunt_dir' must be a string path."
-                )
-            candidates.append(Path(raw_config_path).expanduser())
 
     for root_candidate in terraform_root_candidates():
         candidates.append(Path(root_candidate).expanduser() / "maas-nodes")
@@ -906,22 +902,25 @@ def _wait_for_lxd_daemon_responsive(
     run(["lxc", "query", "/1.0"], check=True)
 
 
-def _configure_lxd_common(admin_pw: str) -> None:
+def _configure_lxd_common() -> None:
     run("sudo snap set lxd daemon.user.group=adm")
     _wait_for_lxd_daemon_responsive()
     _run_lxd_minimal_init()
+    # Remove password trust left by older cephtools versions before exposing
+    # the LXD API. MAAS enrollment enables it only for the duration of a
+    # single registration attempt.
+    run(["lxc", "config", "unset", "core.trust_password"], quiet=True)
     run(["lxc", "config", "set", "core.https_address", ":8443"])
-    run(["lxc", "config", "set", "core.trust_password", admin_pw])
 
 
-def lxd_init_impl(ip, admin_pw, lxdbridge):
+def lxd_init_impl(ip, lxdbridge):
     _stop_bind9_for_lxd_setup()
     _wait_for_bind9_shutdown()
     try:
         # Use minimal init so LXD does not auto-create lxdbr0 with dnsmasq
         # enabled before we can disable DNS/DHCP. We create and configure the
         # managed bridges explicitly afterwards.
-        _configure_lxd_common(admin_pw)
+        _configure_lxd_common()
         ensure_lxd_network(lxdbridge)
         ensure_lxd_default_profile_network(lxdbridge)
         ensure_lxd_network(EXT_LXD_NETWORK)
@@ -931,13 +930,12 @@ def lxd_init_impl(ip, admin_pw, lxdbridge):
 
 
 def lxd_init_vm_impl(
-    admin_pw: str,
     lxdbridge: str,
     maas_lxdbridge: str,
     maas_lxd_project: str,
 ) -> None:
     """Initialize host LXD for VM-mode without touching host bind9."""
-    _configure_lxd_common(admin_pw)
+    _configure_lxd_common()
     ensure_lxd_host_network(lxdbridge)
     ensure_lxd_default_profile_network(lxdbridge)
     ensure_lxd_maas_network(maas_lxdbridge)
@@ -945,9 +943,9 @@ def lxd_init_vm_impl(
     time.sleep(2)
 
 
-def lxd_init_lxd_impl(admin_pw: str, lxdbridge: str) -> None:
+def lxd_init_lxd_impl(lxdbridge: str) -> None:
     """Initialize host LXD for the LXD-only substrate."""
-    _configure_lxd_common(admin_pw)
+    _configure_lxd_common()
     ensure_lxd_host_network(lxdbridge)
     ensure_lxd_default_profile_network(lxdbridge)
     ensure_lxd_host_network(EXT_LXD_NETWORK)
@@ -1551,7 +1549,6 @@ def register_lxd_vmhost_impl(
     admin,
     vmhost,
     ip,
-    admin_pw,
     *,
     project: str = "default",
     maas_vm_name: str | None = None,
@@ -1561,28 +1558,68 @@ def register_lxd_vmhost_impl(
             existing_id = _get_lxd_vm_host_id(admin, vmhost)
         else:
             existing_id = _get_lxd_vm_host_id(admin, vmhost, maas_vm_name=maas_vm_name)
-    except click.ClickException:
+    except VMHostNotFound:
         existing_id = None
     if existing_id is not None:
         click.echo(
             f"VM host '{vmhost}' already registered in MAAS (id {existing_id}); skipping create."
         )
         return
-    _run_maas_cli(
-        " ".join(
-            [
-                f'maas "{admin}" vm-hosts create type=lxd',
-                f'name="{vmhost}"',
-                f'project="{project}"',
-                f'power_address="https://{ip}:8443"',
-                f'password="{admin_pw}"',
-                "--debug",
-                "|| true",
-            ]
-        ),
-        shell=True,
-        maas_vm_name=maas_vm_name,
-    )
+
+    trust_password = secrets.token_urlsafe(32)
+    try:
+        try:
+            trust_result = run(
+                ["lxc", "config", "set", "core.trust_password", trust_password],
+                check=False,
+                quiet=True,
+            )
+        except subprocess.CalledProcessError:
+            raise click.ClickException(
+                "Failed to enable temporary LXD password trust."
+            ) from None
+        if trust_result.returncode != 0:
+            raise click.ClickException("Failed to enable temporary LXD password trust.")
+
+        try:
+            enrollment_result = _run_maas_cli(
+                " ".join(
+                    [
+                        f'maas "{admin}" vm-hosts create type=lxd',
+                        f'name="{vmhost}"',
+                        f'project="{project}"',
+                        f'power_address="https://{ip}:8443"',
+                        f'password="{trust_password}"',
+                    ]
+                ),
+                check=False,
+                shell=True,
+                quiet=True,
+                maas_vm_name=maas_vm_name,
+            )
+        except subprocess.CalledProcessError:
+            raise click.ClickException("Failed to register the LXD VM host.") from None
+        if enrollment_result.returncode != 0:
+            detail = _format_process_error(enrollment_result).replace(
+                trust_password, "<redacted>"
+            )
+            raise click.ClickException(f"Failed to register the LXD VM host: {detail}")
+    except BaseException as enrollment_error:
+        try:
+            run(
+                ["lxc", "config", "unset", "core.trust_password"],
+                quiet=True,
+            )
+        except BaseException:
+            enrollment_error.add_note(
+                "Additionally failed to disable temporary LXD password trust."
+            )
+        raise
+    else:
+        run(
+            ["lxc", "config", "unset", "core.trust_password"],
+            quiet=True,
+        )
 
 
 def extract_arches(resources):
@@ -1781,6 +1818,10 @@ def assign_space_to_vlan(
     )
 
 
+class VMHostNotFound(click.ClickException):
+    """Raised when a named MAAS VM host is genuinely absent."""
+
+
 def _get_lxd_vm_host_id(
     admin: str, vmhost: str, *, maas_vm_name: str | None = None
 ) -> str:
@@ -1800,7 +1841,7 @@ def _get_lxd_vm_host_id(
             if host_id is None:
                 break
             return str(host_id)
-    raise click.ClickException(f"VM host '{vmhost}' not found in MAAS vm-hosts output.")
+    raise VMHostNotFound(f"VM host '{vmhost}' not found in MAAS vm-hosts output.")
 
 
 def _get_vm_host_architectures(
@@ -2208,6 +2249,11 @@ def _lxd_instance_device_names(instance: str) -> set[str]:
 
 def _lxd_osd_volume_name(machine_id: str, disk_index: int) -> str:
     return f"{CEPHTOOLS_MODEL}-{machine_id}-osd-{disk_index}"
+
+
+def _is_lxd_osd_volume_name(name: str) -> bool:
+    pattern = rf"{re.escape(CEPHTOOLS_MODEL)}-[0-9]+-osd-[0-9]+"
+    return re.fullmatch(pattern, name) is not None
 
 
 def _attach_lxd_osd_volumes(
@@ -2986,12 +3032,12 @@ def _cleanup_restore_systemd_timesyncd(*, dry_run: bool = False) -> CleanupPhase
 
 def _cleanup_lxd_osd_volumes(*, dry_run: bool = False) -> CleanupPhaseResult:
     phase = "delete LXD OSD volumes"
-    prefix = f"{CEPHTOOLS_MODEL}-"
+    volume_pattern = f"{CEPHTOOLS_MODEL}-<machine-id>-osd-<disk-index>"
     if dry_run:
         return CleanupPhaseResult(
             phase,
             "ok",
-            f"dry-run: would delete LXD custom block volumes prefixed {prefix}",
+            f"dry-run: would delete LXD custom block volumes matching {volume_pattern}",
         )
     if shutil.which("lxc") is None:
         return CleanupPhaseResult(phase, "skipped", "lxc command not found")
@@ -3013,7 +3059,7 @@ def _cleanup_lxd_osd_volumes(*, dry_run: bool = False) -> CleanupPhaseResult:
         name = volume.get("name")
         content_type = volume.get("content_type")
         volume_type = volume.get("type")
-        if not isinstance(name, str) or not name.startswith(prefix):
+        if not isinstance(name, str) or not _is_lxd_osd_volume_name(name):
             continue
         if volume_type != "custom" or content_type != "block":
             continue
@@ -3046,130 +3092,70 @@ def _emit_cleanup_summary(results: list[CleanupPhaseResult]) -> None:
 
 @click.group(help="MAAS/LXD/Juju bootstrap CLI.")
 @click.option(
-    "--admin", default=DEFAULTS["admin"], show_default=True, help="MAAS admin user"
-)
-@click.option(
-    "--admin-pw",
-    default=DEFAULTS["admin_pw"],
-    show_default=True,
-    help="MAAS admin password",
-)
-@click.option(
-    "--admin-mail",
-    default=DEFAULTS["admin_mail"],
-    show_default=True,
-    help="MAAS admin email",
-)
-@click.option(
     "--maas-version",
-    default=DEFAULTS["maas_version"],
+    default=DEFAULT_MAAS_VERSION,
     show_default=True,
     help="MAAS PPA version, e.g. 3.7",
 )
 @click.option(
-    "--lxdbridge",
-    default=DEFAULTS["lxdbridge"],
-    show_default=True,
-    help="Normal host LXD bridge name",
-)
-@click.option(
     "--substrate",
     type=click.Choice(list(SUBSTRATES)),
-    default=DEFAULTS["substrate"],
+    default=DEFAULT_SUBSTRATE,
     show_default=True,
     help="Choose the test environment substrate.",
 )
 @click.option(
-    "--maas-lxdbridge",
-    default=DEFAULTS["maas_lxdbridge"],
-    show_default=True,
-    help="MAAS-owned LXD bridge name for VM mode.",
-)
-@click.option(
-    "--maas-vm-name",
-    default=DEFAULTS["maas_vm_name"],
-    show_default=True,
-    help="Bootstrap MAAS VM name.",
-)
-@click.option(
     "--maas-vm-cpus",
     type=int,
-    default=DEFAULTS["maas_vm_cpus"],
+    default=DEFAULT_MAAS_VM_CPUS,
     show_default=True,
     help="CPU limit for the MAAS VM.",
 )
 @click.option(
     "--maas-vm-memory",
-    default=DEFAULTS["maas_vm_memory"],
+    default=DEFAULT_MAAS_VM_MEMORY,
     show_default=True,
     help="Memory limit for the MAAS VM.",
 )
 @click.option(
     "--maas-vm-disk",
-    default=DEFAULTS["maas_vm_disk"],
+    default=DEFAULT_MAAS_VM_DISK,
     show_default=True,
     help="Root disk size for the MAAS VM.",
 )
 @click.option(
-    "--maas-vm-ip",
-    default=DEFAULTS["maas_vm_ip"],
-    show_default=True,
-    help="Static MAAS VM IP on the MAAS bridge; derived when unset.",
-)
-@click.option(
     "--maas-vm-image",
-    default=DEFAULTS["maas_vm_image"],
+    default=DEFAULT_MAAS_VM_IMAGE,
     show_default=True,
     help="Image used for the MAAS VM.",
-)
-@click.option(
-    "--maas-lxd-project",
-    default=DEFAULTS["maas_lxd_project"],
-    show_default=True,
-    help="LXD project used for MAAS-composed VMs.",
-)
-@click.option(
-    "--vmhost",
-    default=DEFAULTS["vmhost"],
-    show_default=True,
-    help="VM host name in MAAS",
 )
 @click.pass_context
 def cli(
     ctx,
-    admin,
-    admin_pw,
-    admin_mail,
     maas_version,
-    lxdbridge,
     substrate,
-    maas_lxdbridge,
-    maas_vm_name,
     maas_vm_cpus,
     maas_vm_memory,
     maas_vm_disk,
-    maas_vm_ip,
     maas_vm_image,
-    maas_lxd_project,
-    vmhost,
 ):
     ctx.ensure_object(dict)
     ctx.obj.update(
-        admin=admin,
-        admin_pw=admin_pw,
-        admin_mail=admin_mail,
+        admin=MAAS_ADMIN,
+        admin_pw=MAAS_ADMIN_PASSWORD,
+        admin_mail=MAAS_ADMIN_EMAIL,
         maas_version=maas_version,
-        lxdbridge=lxdbridge,
+        lxdbridge=LXD_BRIDGE,
         substrate=substrate,
-        maas_lxdbridge=maas_lxdbridge,
-        maas_vm_name=maas_vm_name,
+        maas_lxdbridge=MAAS_LXD_BRIDGE,
+        maas_vm_name=MAAS_VM_NAME,
         maas_vm_cpus=maas_vm_cpus,
         maas_vm_memory=maas_vm_memory,
         maas_vm_disk=maas_vm_disk,
-        maas_vm_ip=maas_vm_ip,
+        maas_vm_ip=None,
         maas_vm_image=maas_vm_image,
-        maas_lxd_project=maas_lxd_project,
-        vmhost=vmhost,
+        maas_lxd_project=MAAS_LXD_PROJECT,
+        vmhost=MAAS_VM_HOST,
         ip=primary_ip(),
     )
     ctx.obj["maas_url"] = f"http://{ctx.obj['ip']}:5240/MAAS"
@@ -3226,15 +3212,14 @@ def lxd_init_cmd(ctx):
     substrate = ctx.obj["substrate"]
     if substrate == SUBSTRATE_MAAS_VM:
         lxd_init_vm_impl(
-            ctx.obj["admin_pw"],
             ctx.obj["lxdbridge"],
             ctx.obj["maas_lxdbridge"],
             ctx.obj["maas_lxd_project"],
         )
     elif substrate == SUBSTRATE_LXD:
-        lxd_init_lxd_impl(ctx.obj["admin_pw"], ctx.obj["lxdbridge"])
+        lxd_init_lxd_impl(ctx.obj["lxdbridge"])
     else:
-        lxd_init_impl(ctx.obj["ip"], ctx.obj["admin_pw"], ctx.obj["lxdbridge"])
+        lxd_init_impl(ctx.obj["ip"], ctx.obj["lxdbridge"])
     verify_lxd(ctx.obj["lxdbridge"])
     if substrate == SUBSTRATE_MAAS_HOST:
         lxd_warmup()
@@ -3333,7 +3318,6 @@ def register_vm_host(ctx):
         ctx.obj["admin"],
         ctx.obj["vmhost"],
         lxd_api_ip,
-        ctx.obj["admin_pw"],
         project=project,
         maas_vm_name=maas_vm_name,
     )
@@ -3517,7 +3501,7 @@ def destroy_nodes(ctx):
 @click.option(
     "--keep-nodes",
     is_flag=True,
-    help="Do not destroy Terragrunt-managed nodes.",
+    help="Do not destroy managed nodes; also preserve the Juju controller.",
 )
 @click.option(
     "--keep-controller",
@@ -3587,6 +3571,12 @@ def cleanup(
     substrate = ctx.obj["substrate"]
     maas_vm_name = _ctx_maas_vm_name(ctx.obj)
     controller_name = _controller_name(substrate)
+    preserve_controller = keep_controller or keep_nodes
+    controller_preservation_detail = (
+        "preserved by --keep-nodes"
+        if keep_nodes and not keep_controller
+        else "preserved by --keep-controller"
+    )
 
     results: list[CleanupPhaseResult] = []
     nodes_result: CleanupPhaseResult | None = None
@@ -3603,12 +3593,12 @@ def cleanup(
             )
         results.append(nodes_result)
 
-    if keep_controller:
+    if preserve_controller:
         results.append(
             CleanupPhaseResult(
                 f"kill controller {controller_name}",
                 "skipped",
-                "preserved by --keep-controller",
+                controller_preservation_detail,
             )
         )
     else:

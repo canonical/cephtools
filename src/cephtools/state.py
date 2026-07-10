@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
+
+import click
+import yaml
 
 STATE_ENV_VAR = "CEPHTOOLS_STATE_HOME"
 
@@ -23,6 +27,27 @@ def ensure_state_dir() -> Path:
     state_dir = default_state_home()
     state_dir.mkdir(parents=True, exist_ok=True)
     return state_dir
+
+
+def load_nested_yaml(path: Path) -> dict[str, Any]:
+    """Load YAML content from disk and require a mapping at the document root."""
+    target = path.expanduser()
+    try:
+        raw = target.read_text()
+    except FileNotFoundError as exc:  # pragma: no cover - defensive
+        raise click.ClickException(f"Expected state file at {target}") from exc
+
+    try:
+        parsed = yaml.safe_load(raw)
+        data = {} if parsed is None else parsed
+    except yaml.YAMLError as exc:
+        raise click.ClickException(f"Failed to parse YAML in {target}: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise click.ClickException(
+            f"{target} has unexpected YAML structure (expected a mapping)."
+        )
+    return data
 
 
 def get_state_file(name: str, *, ensure_parent: bool = True) -> Path:

@@ -1,13 +1,10 @@
 import click
 
-from cephtools.config import load_cephtools_config
 from cephtools.reltool import charm_rel, list_prs
 from cephtools.testenv import cli as testenv_cli
 from cephtools.testflinger import cli as testflinger_cli
 from cephtools.microceph import cli as microceph_cli
 from cephtools.terraform import cli as terraform_cli
-
-load_cephtools_config(ensure=True)
 
 
 @click.group()

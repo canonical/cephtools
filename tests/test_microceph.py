@@ -10,9 +10,6 @@ from cephtools import microceph
 
 
 def test_resolve_nodes_from_status(monkeypatch: pytest.MonkeyPatch) -> None:
-    config = {"juju_model": "ceph-model"}
-    monkeypatch.setattr(microceph, "load_cephtools_config", lambda ensure=True: config)
-
     captured: dict[str, object] = {}
 
     def fake_application_machines(model: str, application: str) -> tuple[int, ...]:
@@ -22,18 +19,13 @@ def test_resolve_nodes_from_status(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(microceph, "application_machines", fake_application_machines)
 
-    nodes = microceph._resolve_nodes()
+    nodes = microceph._resolve_nodes(model="ceph-model")
 
     assert nodes == (3, 4)
     assert captured == {"model": "ceph-model", "application": "microceph"}
 
 
 def test_resolve_nodes_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fail_load_config(**_: object) -> None:
-        raise AssertionError("load_cephtools_config should not be called")
-
-    monkeypatch.setattr(microceph, "load_cephtools_config", fail_load_config)
-
     def fail_application_machines(*_: object, **__: object) -> tuple[int, ...]:
         raise AssertionError("application_machines should not be called")
 
@@ -51,7 +43,9 @@ def test_add_disks_cli_invokes_runner(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         microceph,
         "_resolve_nodes",
-        lambda nodes_override=None: nodes if nodes_override is None else tuple(),
+        lambda nodes_override=None, model=microceph.DEFAULT_JUJU_MODEL: (
+            nodes if nodes_override is None else tuple()
+        ),
     )
 
     captured: dict[str, object] = {}
@@ -60,10 +54,12 @@ def test_add_disks_cli_invokes_runner(monkeypatch: pytest.MonkeyPatch) -> None:
         resolved_nodes,
         factory,
         *,
+        model: str,
         use_sudo: bool,
         dry_run: bool,
     ):
         captured["nodes"] = tuple(resolved_nodes)
+        captured["model"] = model
         captured["use_sudo"] = use_sudo
         captured["dry_run"] = dry_run
         captured["commands"] = [tuple(factory(node)) for node in resolved_nodes]
@@ -83,6 +79,7 @@ def test_add_disks_cli_invokes_runner(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert result.exit_code == 0
     assert captured["nodes"] == nodes
+    assert captured["model"] == microceph.DEFAULT_JUJU_MODEL
     assert captured["use_sudo"] is False
     assert captured["dry_run"] is False
     assert captured["commands"] == [
@@ -96,12 +93,16 @@ def test_add_disks_cli_passes_node_overrides(monkeypatch: pytest.MonkeyPatch) ->
     nodes = (99,)
     captured: dict[str, object] = {}
 
-    def fake_loader(nodes_override=None):
+    def fake_loader(nodes_override=None, *, model=microceph.DEFAULT_JUJU_MODEL):
         captured["nodes_override"] = nodes_override
+        captured["model"] = model
         return nodes
 
+    def fake_runner(*_args, **kwargs):
+        captured["execution_model"] = kwargs["model"]
+
     monkeypatch.setattr(microceph, "_resolve_nodes", fake_loader)
-    monkeypatch.setattr(microceph, "_run_on_all_nodes", lambda *a, **k: [])
+    monkeypatch.setattr(microceph, "_run_on_all_nodes", fake_runner)
 
     result = runner.invoke(
         microceph.cli,
@@ -113,12 +114,37 @@ def test_add_disks_cli_passes_node_overrides(monkeypatch: pytest.MonkeyPatch) ->
             "1",
             "--nodes",
             "2",
+            "--model",
+            "ceph-model",
             "--dry-run",
         ],
     )
 
     assert result.exit_code == 0
     assert captured["nodes_override"] == ("1", "2")
+    assert captured["model"] == "ceph-model"
+    assert captured["execution_model"] == "ceph-model"
+
+
+def test_run_on_all_nodes_targets_selected_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_ssh_run(command):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(microceph, "_ssh_run", fake_ssh_run)
+
+    microceph._run_on_all_nodes(
+        (7,),
+        lambda _node: ["microceph", "status"],
+        model="ceph-model",
+        use_sudo=False,
+    )
+
+    assert commands == [["juju", "ssh", "-m", "ceph-model", "7", "microceph", "status"]]
 
 
 def test_run_on_all_nodes_reports_failures(
@@ -127,7 +153,7 @@ def test_run_on_all_nodes_reports_failures(
     nodes = (1, 2)
 
     def fake_ssh_run(command):
-        target = command[2]
+        target = command[4]
         if target == "2":
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="boom")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")

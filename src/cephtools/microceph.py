@@ -6,11 +6,14 @@ from typing import Callable, Iterable, Sequence
 
 import click
 
-from cephtools.config import load_cephtools_config
 from cephtools.juju_utils import application_machines
 
+DEFAULT_JUJU_MODEL = "cephtools"
 
-def _resolve_nodes(nodes_override: Iterable[str] | None = None) -> tuple[int, ...]:
+
+def _resolve_nodes(
+    nodes_override: Iterable[str] | None = None, *, model: str = DEFAULT_JUJU_MODEL
+) -> tuple[int, ...]:
     """Determine MicroCeph nodes from CLI overrides or Juju status."""
     if nodes_override:
         nodes = tuple(
@@ -22,14 +25,7 @@ def _resolve_nodes(nodes_override: Iterable[str] | None = None) -> tuple[int, ..
             )
         return nodes
 
-    config = load_cephtools_config(ensure=True)
-    model_value = config.get("juju_model")
-    if not isinstance(model_value, str) or not model_value:
-        raise click.ClickException(
-            "Unable to determine Juju model. Configure 'juju_model' or provide --nodes."
-        )
-
-    nodes = application_machines(model_value, "microceph")
+    nodes = application_machines(model, "microceph")
     if not nodes:
         raise click.ClickException(
             "No microceph units found in Juju status. Ensure the application is deployed or provide --nodes."
@@ -78,6 +74,7 @@ def _run_on_all_nodes(
     nodes: Sequence[int],
     command_factory: CommandFactory,
     *,
+    model: str = DEFAULT_JUJU_MODEL,
     use_sudo: bool = True,
     dry_run: bool = False,
 ) -> None:
@@ -102,7 +99,7 @@ def _run_on_all_nodes(
         if dry_run:
             continue
 
-        ssh_command = ["juju", "ssh", str(node), *display_command]
+        ssh_command = ["juju", "ssh", "-m", model, str(node), *display_command]
         completed = _ssh_run(ssh_command)
 
         if completed.stdout:
@@ -139,7 +136,13 @@ def disk() -> None:
 @click.option(
     "--nodes",
     multiple=True,
-    help="Override the configured node list (may be provided multiple times).",
+    help="Override Juju node discovery (may be provided multiple times).",
+)
+@click.option(
+    "--model",
+    default=DEFAULT_JUJU_MODEL,
+    show_default=True,
+    help="Juju model used to discover MicroCeph units.",
 )
 @click.option(
     "--sudo/--no-sudo",
@@ -155,12 +158,13 @@ def disk() -> None:
 def add_disk(
     disk_args: tuple[str, ...],
     nodes: tuple[str, ...],
+    model: str,
     sudo: bool,
     dry_run: bool,
 ) -> None:
     """Add disks to every node in the MicroCeph cluster."""
 
-    resolved_nodes = _resolve_nodes(nodes_override=nodes or None)
+    resolved_nodes = _resolve_nodes(nodes_override=nodes or None, model=model)
 
     def _command_factory(node: int) -> list[str]:
         return ["microceph", "disk", "add", *disk_args]
@@ -168,6 +172,7 @@ def add_disk(
     _run_on_all_nodes(
         resolved_nodes,
         _command_factory,
+        model=model,
         use_sudo=sudo,
         dry_run=dry_run,
     )

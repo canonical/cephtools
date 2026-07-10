@@ -45,7 +45,7 @@ def test_get_lxd_vm_host_id_missing(monkeypatch):
 
     monkeypatch.setattr(testenv, "run", fake_run)
 
-    with pytest.raises(ClickException):
+    with pytest.raises(testenv.VMHostNotFound):
         testenv._get_lxd_vm_host_id("admin", "local-lxd")
 
 
@@ -69,32 +69,265 @@ def test_register_lxd_vmhost_impl_skips_existing(monkeypatch):
     monkeypatch.setattr(testenv, "run", fake_run)
     monkeypatch.setattr(testenv.click, "echo", fake_echo)
 
-    testenv.register_lxd_vmhost_impl("admin", "local-lxd", "10.0.0.1", "secret")
+    testenv.register_lxd_vmhost_impl("admin", "local-lxd", "10.0.0.1")
 
     assert calls == []
     assert echoes and "skipping create" in echoes[0]
 
 
-def test_register_lxd_vmhost_impl_creates_when_missing(monkeypatch):
-    commands: list[str] = []
+def test_register_lxd_vmhost_impl_uses_unlogged_one_time_password(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list[tuple[object, bool, bool]] = []
+    secret = "one-time-trust-password"
 
     def missing_host(*args, **kwargs):
-        raise ClickException("not found")
+        raise testenv.VMHostNotFound("not found")
 
     def fake_run(cmd, check=True, shell=False, quiet=False):
-        commands.append(cmd)
-
-        class Result:
-            stdout = ""
-
-        return Result()
+        calls.append((cmd, check, quiet))
+        if not quiet:
+            print(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(testenv, "_get_lxd_vm_host_id", missing_host)
     monkeypatch.setattr(testenv, "run", fake_run)
+    monkeypatch.setattr(testenv.secrets, "token_urlsafe", lambda size: secret)
 
-    testenv.register_lxd_vmhost_impl("admin", "local-lxd", "10.0.0.1", "secret")
+    testenv.register_lxd_vmhost_impl("admin", "local-lxd", "10.0.0.1")
 
-    assert any("vm-hosts create type=lxd" in cmd for cmd in commands)
+    assert calls[0] == (
+        ["lxc", "config", "set", "core.trust_password", secret],
+        False,
+        True,
+    )
+    enrollment_call = next(call for call in calls if isinstance(call[0], str))
+    assert f'password="{secret}"' in enrollment_call[0]
+    assert "--debug" not in enrollment_call[0]
+    assert "|| true" not in enrollment_call[0]
+    assert enrollment_call[2] is True
+    assert calls[-1] == (
+        ["lxc", "config", "unset", "core.trust_password"],
+        True,
+        True,
+    )
+    captured = capsys.readouterr()
+    assert secret not in captured.out
+    assert secret not in captured.err
+
+
+def test_register_lxd_vmhost_impl_unsets_password_after_failure(monkeypatch):
+    commands: list[tuple[object, bool, bool]] = []
+
+    monkeypatch.setattr(
+        testenv,
+        "_get_lxd_vm_host_id",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            testenv.VMHostNotFound("not found")
+        ),
+    )
+    monkeypatch.setattr(
+        testenv.secrets, "token_urlsafe", lambda size: "one-time-trust-password"
+    )
+
+    def fake_run(command, check=True, quiet=False, **_kwargs):
+        commands.append((command, check, quiet))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+    monkeypatch.setattr(
+        testenv,
+        "_run_maas_cli",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("enroll failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="enroll failed"):
+        testenv.register_lxd_vmhost_impl("admin", "local-lxd", "10.0.0.1")
+
+    assert commands == [
+        (
+            [
+                "lxc",
+                "config",
+                "set",
+                "core.trust_password",
+                "one-time-trust-password",
+            ],
+            False,
+            True,
+        ),
+        (["lxc", "config", "unset", "core.trust_password"], True, True),
+    ]
+
+
+def test_register_lxd_vmhost_impl_fails_when_success_cleanup_fails(monkeypatch):
+    monkeypatch.setattr(
+        testenv,
+        "_get_lxd_vm_host_id",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            testenv.VMHostNotFound("not found")
+        ),
+    )
+    monkeypatch.setattr(testenv.secrets, "token_urlsafe", lambda size: "secret")
+    run_calls = 0
+
+    def fake_run(*args, **_kwargs):
+        nonlocal run_calls
+        run_calls += 1
+        if run_calls == 2:
+            raise RuntimeError("cleanup failed")
+        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+    monkeypatch.setattr(
+        testenv,
+        "_run_maas_cli",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            "maas", 0, stdout="", stderr=""
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        testenv.register_lxd_vmhost_impl("admin", "local-lxd", "10.0.0.1")
+
+
+def test_register_lxd_vmhost_impl_surfaces_cleanup_failure(monkeypatch):
+    monkeypatch.setattr(
+        testenv,
+        "_get_lxd_vm_host_id",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            testenv.VMHostNotFound("not found")
+        ),
+    )
+    monkeypatch.setattr(testenv.secrets, "token_urlsafe", lambda size: "secret")
+    run_calls = 0
+
+    def fake_run(*args, **_kwargs):
+        nonlocal run_calls
+        run_calls += 1
+        if run_calls == 2:
+            raise RuntimeError("cleanup failed")
+        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+    monkeypatch.setattr(
+        testenv,
+        "_run_maas_cli",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("enroll failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="enroll failed") as excinfo:
+        testenv.register_lxd_vmhost_impl("admin", "local-lxd", "10.0.0.1")
+
+    assert excinfo.value.__notes__ == [
+        "Additionally failed to disable temporary LXD password trust."
+    ]
+
+
+def test_register_lxd_vmhost_impl_cleans_up_after_interrupt(monkeypatch):
+    secret = "one-time-trust-password"
+    commands: list[object] = []
+    monkeypatch.setattr(
+        testenv,
+        "_get_lxd_vm_host_id",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            testenv.VMHostNotFound("not found")
+        ),
+    )
+    monkeypatch.setattr(testenv.secrets, "token_urlsafe", lambda size: secret)
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+    monkeypatch.setattr(
+        testenv,
+        "_run_maas_cli",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        testenv.register_lxd_vmhost_impl("admin", "local-lxd", "10.0.0.1")
+
+    assert commands[-1] == ["lxc", "config", "unset", "core.trust_password"]
+
+
+def test_register_lxd_vmhost_impl_redacts_enrollment_failure(monkeypatch):
+    secret = "one-time-trust-password"
+    monkeypatch.setattr(
+        testenv,
+        "_get_lxd_vm_host_id",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            testenv.VMHostNotFound("not found")
+        ),
+    )
+    monkeypatch.setattr(testenv.secrets, "token_urlsafe", lambda size: secret)
+    monkeypatch.setattr(
+        testenv,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 0, stdout="", stderr=""
+        ),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_run_maas_cli",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 1, stdout="", stderr=f"rejected password {secret}"
+        ),
+    )
+
+    with pytest.raises(ClickException) as excinfo:
+        testenv.register_lxd_vmhost_impl("admin", "local-lxd", "10.0.0.1")
+
+    assert secret not in str(excinfo.value)
+    assert "<redacted>" in str(excinfo.value)
+
+
+def test_register_lxd_vmhost_impl_redacts_password_setup_exception(monkeypatch):
+    secret = "one-time-trust-password"
+    calls = 0
+    monkeypatch.setattr(
+        testenv,
+        "_get_lxd_vm_host_id",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            testenv.VMHostNotFound("not found")
+        ),
+    )
+    monkeypatch.setattr(testenv.secrets, "token_urlsafe", lambda size: secret)
+
+    def fake_run(command, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise subprocess.CalledProcessError(1, command, stderr=f"bad {secret}")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    with pytest.raises(ClickException) as excinfo:
+        testenv.register_lxd_vmhost_impl("admin", "local-lxd", "10.0.0.1")
+
+    assert secret not in str(excinfo.value)
+    assert calls == 2  # setup attempt followed by cleanup
+
+
+def test_register_lxd_vmhost_impl_propagates_inspection_error(monkeypatch):
+    calls: list[object] = []
+    monkeypatch.setattr(
+        testenv,
+        "_get_lxd_vm_host_id",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ClickException("Failed to parse MAAS vm-hosts output as JSON.")
+        ),
+    )
+    monkeypatch.setattr(testenv, "run", lambda *args, **kwargs: calls.append(args))
+
+    with pytest.raises(ClickException, match="Failed to parse"):
+        testenv.register_lxd_vmhost_impl("admin", "local-lxd", "10.0.0.1")
+
+    assert calls == []
 
 
 def test_get_vm_host_architectures(monkeypatch):
@@ -356,7 +589,7 @@ def test_lxd_init_impl_stops_and_restarts_bind9(monkeypatch):
         testenv.click, "echo", lambda message, **kwargs: echoes.append(message)
     )
 
-    testenv.lxd_init_impl("10.0.0.1", "secret", "lxdbr0")
+    testenv.lxd_init_impl("10.0.0.1", "lxdbr0")
 
     assert commands[0] == (["sudo", "systemctl", "stop", "bind9"], False, False)
     assert commands[1] == ("sudo snap set lxd daemon.user.group=adm", True, False)
@@ -368,16 +601,21 @@ def test_lxd_init_impl_stops_and_restarts_bind9(monkeypatch):
     assert commands[3] == ("sudo lxd waitready", True, False)
     assert commands[4] == (["lxc", "query", "/1.0"], True, False)
     assert commands[5] == (
-        ["lxc", "config", "set", "core.https_address", ":8443"],
+        ["lxc", "config", "unset", "core.trust_password"],
         True,
         False,
     )
     assert commands[6] == (
-        ["lxc", "config", "set", "core.trust_password", "secret"],
+        ["lxc", "config", "set", "core.https_address", ":8443"],
         True,
         False,
     )
     assert commands[7] == (["sudo", "systemctl", "start", "bind9"], False, False)
+    assert not any(
+        isinstance(command, list)
+        and command[:4] == ["lxc", "config", "set", "core.trust_password"]
+        for command, _check, _quiet in commands
+    )
     assert waited == [True]
     assert init_calls == [True]
     assert ensured_networks == ["lxdbr0", testenv.EXT_LXD_NETWORK]
@@ -407,7 +645,7 @@ def test_lxd_init_impl_restarts_bind9_on_failure(monkeypatch):
     monkeypatch.setattr(testenv, "_run_lxd_minimal_init", lambda: None)
 
     with pytest.raises(RuntimeError, match="boom"):
-        testenv.lxd_init_impl("10.0.0.1", "secret", "lxdbr0")
+        testenv.lxd_init_impl("10.0.0.1", "lxdbr0")
 
     assert commands == [
         (["sudo", "systemctl", "stop", "bind9"], False, False),
@@ -721,7 +959,7 @@ def test_lxd_init_vm_impl_does_not_touch_bind9(monkeypatch):
     monkeypatch.setattr(
         testenv,
         "_configure_lxd_common",
-        lambda admin_pw: calls.append(("common", admin_pw)),
+        lambda: calls.append(("common", None)),
     )
     monkeypatch.setattr(
         testenv,
@@ -747,10 +985,10 @@ def test_lxd_init_vm_impl_does_not_touch_bind9(monkeypatch):
         testenv.time, "sleep", lambda seconds: calls.append(("sleep", seconds))
     )
 
-    testenv.lxd_init_vm_impl("secret", "lxdbr0", "maasbr0", "maas")
+    testenv.lxd_init_vm_impl("lxdbr0", "maasbr0", "maas")
 
     assert calls == [
-        ("common", "secret"),
+        ("common", None),
         ("host-network", "lxdbr0"),
         ("profile", "lxdbr0"),
         ("maas-network", "maasbr0"),
@@ -765,7 +1003,7 @@ def test_lxd_init_lxd_impl_creates_ext_as_host_network(monkeypatch):
     monkeypatch.setattr(
         testenv,
         "_configure_lxd_common",
-        lambda admin_pw: calls.append(("common", admin_pw)),
+        lambda: calls.append(("common", None)),
     )
     monkeypatch.setattr(
         testenv,
@@ -781,10 +1019,10 @@ def test_lxd_init_lxd_impl_creates_ext_as_host_network(monkeypatch):
         testenv.time, "sleep", lambda seconds: calls.append(("sleep", seconds))
     )
 
-    testenv.lxd_init_lxd_impl("secret", "lxdbr0")
+    testenv.lxd_init_lxd_impl("lxdbr0")
 
     assert calls == [
-        ("common", "secret"),
+        ("common", None),
         ("host-network", "lxdbr0"),
         ("profile", "lxdbr0"),
         ("host-network", testenv.EXT_LXD_NETWORK),
@@ -1182,6 +1420,79 @@ def test_destroy_lxd_nodes_impl_detaches_disks_removes_volumes_and_machines(
     ]
 
 
+def test_cleanup_lxd_osd_volumes_deletes_only_exact_generated_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    valid_name = testenv._lxd_osd_volume_name("12", 3)
+    volumes = [
+        {"name": valid_name, "type": "custom", "content_type": "block"},
+        {"name": "cephtools-backup", "type": "custom", "content_type": "block"},
+        {"name": "cephtools-12-data-3", "type": "custom", "content_type": "block"},
+        {"name": "cephtools-host-osd-3", "type": "custom", "content_type": "block"},
+        {"name": "cephtools-12-osd-disk", "type": "custom", "content_type": "block"},
+        {"name": "cephtools-12-osd-3-copy", "type": "custom", "content_type": "block"},
+        {"name": "other-12-osd-3", "type": "custom", "content_type": "block"},
+        {"name": "cephtools-13-osd-4", "type": "custom", "content_type": "filesystem"},
+        {"name": "cephtools-14-osd-5", "type": "container", "content_type": "block"},
+    ]
+    commands: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        if command[:5] == ["lxc", "storage", "volume", "list", "default"]:
+            return subprocess.CompletedProcess(
+                command, 0, stdout=json.dumps(volumes), stderr=""
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(testenv.shutil, "which", lambda name: "/snap/bin/lxc")
+    monkeypatch.setattr(testenv, "_default_lxd_storage_pool", lambda: "default")
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    result = testenv._cleanup_lxd_osd_volumes()
+
+    assert result.outcome == "ok"
+    assert result.detail == f"deleted {valid_name}"
+    assert commands[1:] == [
+        ["lxc", "storage", "volume", "delete", "default", f"custom/{valid_name}"]
+    ]
+
+
+def test_cleanup_lxd_osd_volumes_skips_when_no_exact_names_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    volumes = [
+        {"name": "cephtools-backup", "type": "custom", "content_type": "block"},
+        {"name": "cephtools-0-osd-x", "type": "custom", "content_type": "block"},
+        {"name": "cephtools-0-osd-0", "type": "custom", "content_type": "filesystem"},
+    ]
+    commands: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps(volumes), stderr=""
+        )
+
+    monkeypatch.setattr(testenv.shutil, "which", lambda name: "/snap/bin/lxc")
+    monkeypatch.setattr(testenv, "_default_lxd_storage_pool", lambda: "default")
+    monkeypatch.setattr(testenv, "run", fake_run)
+
+    result = testenv._cleanup_lxd_osd_volumes()
+
+    assert result.outcome == "skipped"
+    assert result.detail == "no matching LXD OSD volumes"
+    assert len(commands) == 1
+
+
+def test_cleanup_lxd_osd_volumes_dry_run_describes_exact_pattern() -> None:
+    result = testenv._cleanup_lxd_osd_volumes(dry_run=True)
+
+    assert result.outcome == "ok"
+    assert "cephtools-<machine-id>-osd-<disk-index>" in result.detail
+    assert "prefixed" not in result.detail
+
+
 def test_create_nodes_impl_invokes_terragrunt(
     monkeypatch, tmp_path: Path, state_home: Path
 ):
@@ -1410,28 +1721,25 @@ def test_destroy_nodes_impl_requires_inputs_file(monkeypatch, tmp_path: Path):
         testenv._destroy_nodes_impl()
 
 
-def test_resolve_terragrunt_dir_from_config(
-    monkeypatch, tmp_path: Path, state_home: Path
-):
-    monkeypatch.delenv("CEPHTOOLS_TERRAGRUNT_DIR", raising=False)
-    state_home.mkdir(parents=True, exist_ok=True)
-    preferred_dir = tmp_path / "maas-nodes-config"
+def test_resolve_terragrunt_dir_from_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    preferred_dir = tmp_path / "maas-nodes"
     preferred_dir.mkdir()
-    (state_home / "cephtools.yaml").write_text(f"terragrunt_dir: {preferred_dir}\n")
+    monkeypatch.setenv("CEPHTOOLS_TERRAGRUNT_DIR", str(preferred_dir))
 
     resolved = testenv._resolve_terragrunt_dir()
     assert resolved == preferred_dir
 
 
-def test_resolve_terragrunt_dir_from_terraform_root(
-    monkeypatch, tmp_path: Path, state_home: Path
-):
+def test_resolve_terragrunt_dir_from_terraform_root_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.delenv("CEPHTOOLS_TERRAGRUNT_DIR", raising=False)
-    state_home.mkdir(parents=True, exist_ok=True)
     terraform_root = tmp_path / "terraform-root"
     terragrunt_dir = terraform_root / "maas-nodes"
     terragrunt_dir.mkdir(parents=True)
-    (state_home / "cephtools.yaml").write_text(f"terraform_root: {terraform_root}\n")
+    monkeypatch.setenv("CEPHTOOLS_TERRAFORM_ROOT", str(terraform_root))
 
     resolved = testenv._resolve_terragrunt_dir()
     assert resolved == terragrunt_dir
@@ -1962,7 +2270,7 @@ def test_cleanup_delete_known_lxd_instances_reports_inspection_failure(
     assert "Failed to inspect" in result.detail
 
 
-def test_cleanup_remove_state_files_preserves_cephtools_config(
+def test_cleanup_remove_state_files_ignores_legacy_cephtools_config(
     state_home: Path,
 ) -> None:
     state_home.mkdir(parents=True, exist_ok=True)
@@ -2111,8 +2419,8 @@ def test_cleanup_cli_keep_nodes_preserves_terragrunt_inputs(
     monkeypatch.setattr(
         testenv,
         "_cleanup_kill_controller",
-        lambda controller_name: testenv.CleanupPhaseResult(
-            f"kill controller {controller_name}", "skipped", "absent"
+        lambda *_args, **_kwargs: pytest.fail(
+            "controller cleanup should be implied off by --keep-nodes"
         ),
     )
     monkeypatch.setattr(
@@ -2148,8 +2456,105 @@ def test_cleanup_cli_keep_nodes_preserves_terragrunt_inputs(
 
     assert result.exit_code == 0
     assert calls == ["state-files"]
+    assert (
+        "kill controller maas-controller: skipped (preserved by --keep-nodes)"
+        in result.output
+    )
     assert "remove terragrunt inputs: skipped" in result.output
     assert "preserved while nodes are kept" in result.output
+
+
+def test_cleanup_cli_keep_nodes_implies_keep_controller_for_lxd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    calls: list[str] = []
+    monkeypatch.setattr(testenv, "primary_ip", lambda: "10.0.0.1")
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_kill_controller",
+        lambda *_args, **_kwargs: pytest.fail(
+            "controller cleanup should be implied off by --keep-nodes"
+        ),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_lxd_osd_volumes",
+        lambda *_args, **_kwargs: pytest.fail(
+            "OSD volume cleanup should be skipped by --keep-nodes"
+        ),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_delete_known_lxd_instances",
+        lambda: calls.append("lxd-instances")
+        or testenv.CleanupPhaseResult(
+            "delete known LXD instances", "skipped", "absent"
+        ),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_remove_state_files",
+        lambda: calls.append("state-files")
+        or testenv.CleanupPhaseResult("remove state files", "ok", "removed"),
+    )
+
+    result = runner.invoke(testenv.cli, ["cleanup", "--keep-nodes"])
+
+    assert result.exit_code == 0
+    assert calls == ["lxd-instances", "state-files"]
+    assert (
+        "kill controller lxd-controller: skipped (preserved by --keep-nodes)"
+        in result.output
+    )
+    assert (
+        "delete LXD OSD volumes: skipped (preserved by --keep-nodes)" in result.output
+    )
+
+
+def test_cleanup_cli_explicit_keep_controller_remains_distinct_for_lxd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(testenv, "primary_ip", lambda: "10.0.0.1")
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_kill_controller",
+        lambda *_args, **_kwargs: pytest.fail(
+            "controller cleanup should be skipped by --keep-controller"
+        ),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_lxd_osd_volumes",
+        lambda *_args, **_kwargs: pytest.fail(
+            "OSD volume cleanup should be skipped while controller is kept"
+        ),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_delete_known_lxd_instances",
+        lambda: testenv.CleanupPhaseResult(
+            "delete known LXD instances", "skipped", "absent"
+        ),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_cleanup_remove_state_files",
+        lambda: testenv.CleanupPhaseResult("remove state files", "ok", "removed"),
+    )
+
+    result = runner.invoke(testenv.cli, ["cleanup", "--keep-controller"])
+
+    assert result.exit_code == 0
+    assert (
+        "kill controller lxd-controller: skipped (preserved by --keep-controller)"
+        in result.output
+    )
+    assert (
+        "delete LXD OSD volumes: skipped (preserved while controller is kept)"
+        in result.output
+    )
 
 
 def test_cleanup_cli_best_effort_reports_failures(
@@ -2198,9 +2603,7 @@ def test_cleanup_cli_best_effort_reports_failures(
         or testenv.CleanupPhaseResult("remove terragrunt inputs", "ok", "removed"),
     )
 
-    result = runner.invoke(
-        testenv.cli, ["--substrate", "maas-host", "cleanup"]
-    )
+    result = runner.invoke(testenv.cli, ["--substrate", "maas-host", "cleanup"])
 
     assert calls == [
         "nodes",
@@ -2491,3 +2894,137 @@ def test_cleanup_cli_purge_installed_removes_terragrunt_inputs_after_node_failur
 
     assert result.exit_code == 1
     assert calls == ["nodes", "terragrunt-inputs"]
+
+
+def test_lxd_init_cli_uses_fixed_disposable_lab_conventions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(testenv, "primary_ip", lambda: "10.0.0.1")
+    monkeypatch.setattr(
+        testenv,
+        "lxd_init_lxd_impl",
+        lambda bridge: calls.append(("init", bridge)),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "verify_lxd",
+        lambda bridge: calls.append(("verify", bridge)),
+    )
+
+    result = runner.invoke(testenv.cli, ["lxd-init"])
+
+    assert result.exit_code == 0
+    assert calls == [
+        ("init", testenv.LXD_BRIDGE),
+        ("verify", testenv.LXD_BRIDGE),
+    ]
+
+
+def test_register_vm_host_cli_wires_maas_host_conventions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(testenv, "primary_ip", lambda: "10.0.0.10")
+    monkeypatch.setattr(
+        testenv,
+        "register_lxd_vmhost_impl",
+        lambda admin, vmhost, ip, **kwargs: calls.append(
+            ("register", admin, vmhost, ip, kwargs)
+        ),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "import_boot_resources",
+        lambda admin, **kwargs: calls.append(("import", admin, kwargs)),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "_wait_for_vm_host_architecture",
+        lambda admin, vmhost, arch, **kwargs: calls.append(
+            ("wait", admin, vmhost, arch, kwargs)
+        ),
+    )
+
+    result = runner.invoke(
+        testenv.cli, ["--substrate", "maas-host", "register-vm-host"]
+    )
+
+    assert result.exit_code == 0
+    assert calls[0] == (
+        "register",
+        testenv.MAAS_ADMIN,
+        testenv.MAAS_VM_HOST,
+        "10.0.0.10",
+        {"project": "default", "maas_vm_name": None},
+    )
+    assert calls[1] == ("import", testenv.MAAS_ADMIN, {"maas_vm_name": None})
+    assert calls[2] == (
+        "wait",
+        testenv.MAAS_ADMIN,
+        testenv.MAAS_VM_HOST,
+        testenv.REQUIRED_BOOT_ARCHITECTURE,
+        {"maas_vm_name": None},
+    )
+
+
+def test_register_vm_host_cli_wires_maas_vm_conventions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    calls: list[tuple[object, ...]] = []
+    bridges: list[str] = []
+    monkeypatch.setattr(testenv, "primary_ip", lambda: "10.0.0.10")
+
+    def fake_network(bridge: str) -> tuple[str, str]:
+        bridges.append(bridge)
+        return "10.20.0.0/24", "10.20.0.1"
+
+    monkeypatch.setattr(testenv, "lxd_network_cidr_and_gateway", fake_network)
+    monkeypatch.setattr(
+        testenv,
+        "register_lxd_vmhost_impl",
+        lambda admin, vmhost, ip, **kwargs: calls.append(
+            ("register", admin, vmhost, ip, kwargs)
+        ),
+    )
+    monkeypatch.setattr(testenv, "import_boot_resources", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        testenv, "_wait_for_vm_host_architecture", lambda *args, **kwargs: None
+    )
+
+    result = runner.invoke(testenv.cli, ["--substrate", "maas-vm", "register-vm-host"])
+
+    assert result.exit_code == 0
+    assert bridges == [testenv.MAAS_LXD_BRIDGE]
+    assert calls == [
+        (
+            "register",
+            testenv.MAAS_ADMIN,
+            testenv.MAAS_VM_HOST,
+            "10.20.0.1",
+            {
+                "project": testenv.MAAS_LXD_PROJECT,
+                "maas_vm_name": testenv.MAAS_VM_NAME,
+            },
+        )
+    ]
+
+
+def test_register_vm_host_cli_is_noop_for_lxd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(testenv, "primary_ip", lambda: "10.0.0.10")
+    monkeypatch.setattr(
+        testenv,
+        "register_lxd_vmhost_impl",
+        lambda *args, **kwargs: pytest.fail("registration should be skipped"),
+    )
+
+    result = runner.invoke(testenv.cli, ["register-vm-host"])
+
+    assert result.exit_code == 0
+    assert "skipped for --substrate lxd" in result.output
