@@ -1944,6 +1944,58 @@ class DummyJuju:
         }
 
 
+@pytest.mark.parametrize(
+    ("substrate", "expected_calls"),
+    [
+        (
+            testenv.SUBSTRATE_LXD,
+            ["snap:lxd:False", "snap:terraform:True", "snap:juju:False", "lxd-ready"],
+        ),
+        (
+            testenv.SUBSTRATE_MAAS_VM,
+            ["snap:lxd:False", "snap:terraform:True", "terragrunt", "lxd-ready"],
+        ),
+        (
+            testenv.SUBSTRATE_MAAS_HOST,
+            [
+                f"maas:{testenv.DEFAULT_MAAS_VERSION}",
+                "snap:lxd:False",
+                "snap:terraform:True",
+                "terragrunt",
+                "lxd-ready",
+            ],
+        ),
+    ],
+)
+def test_install_deps_installs_terraform_for_every_substrate(
+    monkeypatch: pytest.MonkeyPatch,
+    substrate: str,
+    expected_calls: list[str],
+) -> None:
+    calls: list[str] = []
+    runner = CliRunner()
+
+    monkeypatch.setattr(
+        testenv,
+        "install_maas_deb",
+        lambda version: calls.append(f"maas:{version}"),
+    )
+    monkeypatch.setattr(
+        testenv,
+        "ensure_snap",
+        lambda name, classic=False: calls.append(f"snap:{name}:{classic}"),
+    )
+    monkeypatch.setattr(
+        testenv, "ensure_terragrunt", lambda: calls.append("terragrunt")
+    )
+    monkeypatch.setattr(testenv, "lxd_ready", lambda: calls.append("lxd-ready"))
+
+    result = runner.invoke(testenv.cli, ["--substrate", substrate, "install-deps"])
+
+    assert result.exit_code == 0
+    assert calls == expected_calls
+
+
 def test_juju_onboard_bootstraps_when_missing(
     monkeypatch: pytest.MonkeyPatch, state_home: Path
 ):

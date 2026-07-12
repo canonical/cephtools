@@ -3197,10 +3197,10 @@ def install_deps(ctx):
     if substrate == SUBSTRATE_MAAS_HOST:
         install_maas_deb(ctx.obj["maas_version"])
     ensure_snap("lxd")
+    ensure_snap("terraform", classic=True)
     if substrate == SUBSTRATE_LXD:
         ensure_snap("juju")
     else:
-        ensure_snap("terraform", classic=True)
         ensure_terragrunt()
     lxd_ready()
     click.echo("deps installed.")
