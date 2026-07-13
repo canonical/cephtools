@@ -109,7 +109,7 @@ Testenv uses fixed disposable-lab conventions for resource names, bridges, MAAS 
 
 Below are the individual steps:
 
-- `cephtools testenv install-deps`: installs the substrate dependencies. MAAS substrates install MAAS/Terraform/Terragrunt as needed; the LXD substrate installs only LXD and Juju.
+- `cephtools testenv install-deps`: installs the substrate dependencies. Every substrate installs LXD and Terraform; the LXD substrate also installs Juju, while MAAS substrates install MAAS/Terragrunt as needed.
 - `cephtools testenv lxd-init`: runs non-interactive LXD initialisation. In LXD substrate mode it creates both the normal bridge and the `ext` bridge with LXD-managed DHCP/DNS.
 - `cephtools testenv maas-init`: MAAS-only; configures MAAS and writes MAAS cloud state.
 - `cephtools testenv register-vm-host`: MAAS-only; registers local LXD as a MAAS VM host and kicks off boot-resource imports.
