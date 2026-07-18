@@ -1010,6 +1010,147 @@ def _restart_system_resolver() -> None:
     run("sudo systemctl restart systemd-resolved || true", shell=True, check=False)
 
 
+# Bases warmed by juju_warmup(). Juju fetches each base's VM image lazily on
+# first deploy; a cold fetch under load can stall provisioning (GH run
+# 29607039184). Defaults cover every base the ceph-qa predeployed matrix uses.
+JUJU_WARMUP_BASES = ("ubuntu@22.04", "ubuntu@24.04", "ubuntu@26.04")
+JUJU_WARMUP_VM_CONSTRAINTS = "virt-type=virtual-machine mem=4G root-disk=32G"
+JUJU_WARMUP_TIMEOUT_SECONDS = 600
+JUJU_WARMUP_POLL_INTERVAL_SECONDS = 10
+
+
+def _warmup_model_name(base: str) -> str:
+    """Map a base (ubuntu@24.04) to a valid Juju model name (warmup-ubuntu-24-04)."""
+    return "warmup-" + base.replace("@", "-").replace(".", "-")
+
+
+def _destroy_warmup_model(controller: str, model: str) -> None:
+    run(
+        [
+            "juju",
+            "destroy-model",
+            f"{controller}:{model}",
+            "--force",
+            "--no-wait",
+            "--destroy-storage",
+            "--no-prompt",
+        ],
+        check=False,
+    )
+
+
+def _wait_for_warmup_machine(
+    controller: str,
+    model: str,
+    timeout_seconds: int,
+    poll_interval_seconds: int,
+) -> None:
+    """Poll juju status until machine 0 is started, else raise TimeoutError."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        res = run(
+            ["juju", "status", "--model", f"{controller}:{model}", "--format", "json"],
+            check=False,
+        )
+        if res.returncode == 0 and res.stdout:
+            try:
+                payload = json.loads(res.stdout)
+                machines = (
+                    payload.get("machines") if isinstance(payload, dict) else None
+                )
+                m0 = machines.get("0") if isinstance(machines, dict) else None
+                if isinstance(m0, dict):
+                    status = m0.get("machine-status", {})
+                    if isinstance(status, dict) and status.get("status") == "started":
+                        return
+            except (json.JSONDecodeError, AttributeError):
+                pass  # transient parse issue; keep polling
+        time.sleep(poll_interval_seconds)
+    raise TimeoutError(f"warmup machine not started within {timeout_seconds}s")
+
+
+def juju_warmup(
+    bases: tuple[str, ...] = JUJU_WARMUP_BASES,
+    *,
+    controller: str = LXD_CONTROLLER,
+    vm_constraints: str = JUJU_WARMUP_VM_CONSTRAINTS,
+    timeout_seconds: int = JUJU_WARMUP_TIMEOUT_SECONDS,
+    poll_interval_seconds: int = JUJU_WARMUP_POLL_INTERVAL_SECONDS,
+) -> None:
+    """Pre-cache Juju's per-base VM images by adding then removing a machine.
+
+    Juju fetches each base's VM image lazily on first deploy of that base; a
+    cold fetch under load can stall provisioning (GH run 29607039184). Warming
+    during ``testenv install`` (reserve time) populates the cache so the first
+    matrix job starts warm. Best-effort: any failure emits a warning and moves
+    on -- it must never fail the install. LXD substrate only; MAAS commissions
+    real machines rather than LXD VMs, so warmup does not apply there.
+    """
+    for base in bases:
+        model = _warmup_model_name(base)
+        click.echo(f"Warming up Juju VM image for {base} (model {model})...")
+        _destroy_warmup_model(controller, model)  # clean any leftover
+
+        add = run(
+            [
+                "juju",
+                "add-model",
+                model,
+                "--no-switch",
+                "--config",
+                f"default-base={base}",
+                "--controller",
+                controller,
+            ],
+            check=False,
+        )
+        if add.returncode != 0:
+            click.echo(
+                f"Warning: warmup add-model for {base} failed (rc={add.returncode}); "
+                f"skipping. Output:\n{add.stdout}"
+            )
+            continue
+
+        run(
+            [
+                "juju",
+                "set-model-constraints",
+                "--model",
+                f"{controller}:{model}",
+                vm_constraints,
+            ],
+            check=False,
+        )
+
+        try:
+            add_machine = run(
+                [
+                    "juju",
+                    "add-machine",
+                    "--base",
+                    base,
+                    "--model",
+                    f"{controller}:{model}",
+                ],
+                check=False,
+            )
+            if add_machine.returncode != 0:
+                click.echo(
+                    f"Warning: warmup add-machine for {base} failed "
+                    f"(rc={add_machine.returncode}); skipping. Output:\n{add_machine.stdout}"
+                )
+                continue
+
+            _wait_for_warmup_machine(
+                controller, model, timeout_seconds, poll_interval_seconds
+            )
+            click.echo(f"Warmed up Juju VM image for {base}.")
+        except Exception as exc:  # best-effort: never fail install
+            click.echo(f"Warning: warmup for {base} did not complete: {exc}")
+        finally:
+            _destroy_warmup_model(controller, model)
+
+
 def _lxd_instance_exists(name: str) -> bool:
     result = run(["lxc", "info", name], check=False, quiet=True)
     return result.returncode == 0
@@ -3928,6 +4069,11 @@ def install(ctx):
                 "configure-network",
                 "Configuring network",
                 lambda: ctx.invoke(configure_network),
+            ),
+            (
+                "warmup-juju-images",
+                "Warming up Juju VM images",
+                lambda: juju_warmup(),
             ),
         ]
     else:
