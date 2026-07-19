@@ -3080,3 +3080,162 @@ def test_register_vm_host_cli_is_noop_for_lxd(
 
     assert result.exit_code == 0
     assert "skipped for --substrate lxd" in result.output
+
+
+# ---------------------------------------------------------------------------
+# juju_warmup
+# ---------------------------------------------------------------------------
+
+
+class _RunResult:
+    def __init__(self, stdout: str = "", returncode: int = 0):
+        self.stdout = stdout
+        self.stderr = ""
+        self.returncode = returncode
+
+
+def _warmup_run_recorder(calls, *, status_payloads):
+    """Fake testenv.run that drives juju_warmup through to completion.
+
+    For each base, add-model/add-machine/set-model-constraints/destroy-model
+    return success, and `juju status --format json` returns a payload whose
+    machine 0 becomes "started" after one poll.
+    """
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+
+        if cmd[:2] == ["juju", "destroy-model"]:
+            return _RunResult()
+        if cmd[:2] == ["juju", "add-model"]:
+            return _RunResult()
+        if cmd[:2] == ["juju", "set-model-constraints"]:
+            return _RunResult()
+        if cmd[:2] == ["juju", "add-machine"]:
+            return _RunResult()
+        if cmd[:2] == ["juju", "status"]:
+            return _RunResult(stdout=status_payloads.pop(0))
+        raise AssertionError(f"unexpected run: {cmd}")
+
+    return fake_run
+
+
+def test_juju_warmup_caches_each_base_and_destroys_models(monkeypatch):
+    calls: list[list[str]] = []
+    started = json.dumps({"machines": {"0": {"machine-status": {"status": "started"}}}})
+    # One "started" status payload per base (the warmup polls exactly once).
+    payloads = [started, started, started]
+    monkeypatch.setattr(
+        testenv, "run", _warmup_run_recorder(calls, status_payloads=payloads)
+    )
+    monkeypatch.setattr(testenv.time, "sleep", lambda *a, **k: None)
+
+    testenv.juju_warmup()
+
+    # For each base: destroy(cleanup) + add-model + set-constraints + add-machine
+    # + destroy(final). Status polls happen via `run` too.
+    destroys = [c for c in calls if c[:2] == ["juju", "destroy-model"]]
+    add_models = [c for c in calls if c[:2] == ["juju", "add-model"]]
+    add_machines = [c for c in calls if c[:2] == ["juju", "add-machine"]]
+    assert len(add_models) == 3
+    assert len(add_machines) == 3
+    # one cleanup destroy before + one final destroy after, per base
+    assert len(destroys) == 6
+
+    # Each add-machine targets its base and the warmup model on lxd-controller.
+    for base, cmd in zip(
+        ("ubuntu@22.04", "ubuntu@24.04", "ubuntu@26.04"), add_machines
+    ):
+        assert "--base" in cmd
+        assert base in cmd
+        assert "lxd-controller:warmup-ubuntu-" in " ".join(cmd)
+
+
+def test_juju_warmup_is_best_effort_on_add_model_failure(monkeypatch):
+    """A failed add-model must warn and continue, never raise."""
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:2] == ["juju", "add-model"]:
+            return _RunResult(stdout="boom", returncode=2)
+        return _RunResult()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+    monkeypatch.setattr(testenv.time, "sleep", lambda *a, **k: None)
+
+    # Must not raise.
+    testenv.juju_warmup()
+
+
+def test_juju_warmup_is_best_effort_on_timeout(monkeypatch):
+    """A machine that never starts must warn and continue, never raise."""
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:2] == ["juju", "status"]:
+            # machine stuck pending forever
+            return _RunResult(
+                stdout=json.dumps(
+                    {"machines": {"0": {"machine-status": {"status": "pending"}}}}
+                )
+            )
+        return _RunResult()
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+    monkeypatch.setattr(testenv.time, "sleep", lambda *a, **k: None)
+
+    # Short timeout so the test doesn't wait the full default. Must not raise;
+    # the timed-out base's model is still destroyed via the finally block.
+    testenv.juju_warmup(timeout_seconds=0, poll_interval_seconds=0)
+
+
+def test_juju_warmup_model_name_is_valid():
+    assert testenv._warmup_model_name("ubuntu@24.04") == "warmup-ubuntu-24-04"
+    assert testenv._warmup_model_name("ubuntu@26.04") == "warmup-ubuntu-26-04"
+
+
+def test_install_runs_juju_warmup_for_lxd_substrate(monkeypatch):
+    """The LXD install sequence must include a juju warmup step."""
+    runner = CliRunner()
+
+    # Short-circuit every install step so we can assert the step list runs.
+    monkeypatch.setattr(testenv, "install_fault_handlers", lambda name: None)
+    monkeypatch.setattr(testenv, "install_deps", lambda *a, **k: None)
+    monkeypatch.setattr(testenv, "lxd_init_cmd", lambda *a, **k: None)
+    monkeypatch.setattr(testenv, "juju_init", lambda *a, **k: None)
+    monkeypatch.setattr(testenv, "configure_network", lambda *a, **k: None)
+    monkeypatch.setattr(testenv, "_ensure_model_for_substrate", lambda *a, **k: None)
+    warmed: list[bool] = []
+    monkeypatch.setattr(testenv, "juju_warmup", lambda *a, **k: warmed.append(True))
+    monkeypatch.setattr(testenv, "mark_complete", lambda: None)
+
+    result = runner.invoke(testenv.cli, ["--substrate", "lxd", "install"])
+
+    assert result.exit_code == 0, result.output
+    assert warmed == [True]
+    assert "Warming up Juju VM images" in result.output
+
+
+def test_install_skips_juju_warmup_for_maas_host_substrate(monkeypatch):
+    """MAAS-host install must not run the LXD-only juju warmup."""
+    runner = CliRunner()
+
+    monkeypatch.setattr(testenv, "install_fault_handlers", lambda name: None)
+    monkeypatch.setattr(testenv, "install_deps", lambda *a, **k: None)
+    monkeypatch.setattr(testenv, "lxd_init_cmd", lambda *a, **k: None)
+    monkeypatch.setattr(testenv, "maas_init_cmd", lambda *a, **k: None)
+    monkeypatch.setattr(testenv, "register_vm_host", lambda *a, **k: None)
+    monkeypatch.setattr(testenv, "configure_network", lambda *a, **k: None)
+    monkeypatch.setattr(testenv, "juju_init", lambda *a, **k: None)
+    monkeypatch.setattr(testenv, "_ensure_model_for_substrate", lambda *a, **k: None)
+    monkeypatch.setattr(
+        testenv,
+        "juju_warmup",
+        lambda *a, **k: pytest.fail("warmup must not run for MAAS"),
+    )
+    monkeypatch.setattr(testenv, "mark_complete", lambda: None)
+    # MAAS juju_onboard path touches state files; stub jubilant to avoid that.
+    monkeypatch.setattr(testenv, "juju_onboard", lambda *a, **k: True)
+
+    result = runner.invoke(testenv.cli, ["--substrate", "maas-host", "install"])
+
+    assert result.exit_code == 0, result.output
+    assert "Warming up Juju VM images" not in result.output
