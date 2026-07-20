@@ -1060,8 +1060,16 @@ def _wait_for_warmup_machine(
                 )
                 m0 = machines.get("0") if isinstance(machines, dict) else None
                 if isinstance(m0, dict):
-                    status = m0.get("machine-status", {})
-                    if isinstance(status, dict) and status.get("status") == "started":
+                    # The machine agent is "started" once juju-status reports it.
+                    # machine-status only reflects the provider instance state
+                    # (e.g. "running") and is not the agent lifecycle. Juju 3.x
+                    # status objects use the "current" key (Juju 2.x used
+                    # "status"), so check both for compatibility.
+                    juju_status = m0.get("juju-status", {})
+                    if isinstance(juju_status, dict) and (
+                        juju_status.get("current") == "started"
+                        or juju_status.get("status") == "started"
+                    ):
                         return
             except (json.JSONDecodeError, AttributeError):
                 pass  # transient parse issue; keep polling
