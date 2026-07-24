@@ -31,6 +31,7 @@ from cephtools.testflinger import (
     read_testenv_credentials,
     read_testenv_network_config,
 )
+from cephtools.testenv_job import cli as job_cli
 
 # Fixed conventions for disposable test environments.
 DEFAULT_MAAS_VERSION = "3.7"
@@ -3289,6 +3290,8 @@ def cli(
     maas_vm_image,
 ):
     ctx.ensure_object(dict)
+    if ctx.invoked_subcommand == "job":
+        return
     ctx.obj.update(
         admin=MAAS_ADMIN,
         admin_pw=MAAS_ADMIN_PASSWORD,
@@ -4126,6 +4129,9 @@ def install(ctx):
         click.echo(f"Admin user: {ctx.obj['admin']}")
     click.echo("You can now use 'juju status' to check your controller.")
     mark_complete()
+
+
+cli.add_command(job_cli, name="job")
 
 
 def main():

@@ -136,6 +136,37 @@ cephtools testenv cleanup --purge-installed
 
 `cleanup` is idempotent and best effort: if a phase has nothing to remove it is reported as skipped, later phases still run after an earlier failure, and the command exits non-zero only after printing the final summary when at least one phase failed. `--purge-installed` is intentionally destructive and cannot be combined with `--keep-*` preservation flags.
 
+### Reconnectable test jobs
+
+`cephtools testenv job` runs a long command on a prepared remote test environment without tying its lifetime to SSH. The controller and host must use releases with the same protocol, reported by `cephtools testenv job protocol`.
+
+A CI job uses three lifecycle commands:
+
+```bash
+cephtools testenv job start \
+  --target ubuntu@HOST --run-id RUN_ID \
+  --run-root /home/ubuntu/cephtools-runs \
+  --lock-file /run/lock/cephtools-testenv-job.lock \
+  --runtime-seconds 7200 --stop-timeout-seconds 300 \
+  --stage ./payload.sh payload.sh \
+  -- /home/ubuntu/cephtools-runs/RUN_ID/payload.sh
+
+cephtools testenv job wait \
+  --target ubuntu@HOST --run-id RUN_ID \
+  --run-root /home/ubuntu/cephtools-runs
+
+# Run from a separate CI `always()` finalizer.
+cephtools testenv job stop \
+  --target ubuntu@HOST --run-id RUN_ID \
+  --run-root /home/ubuntu/cephtools-runs
+```
+
+`start` checks the remote protocol, transactionally stages immutable files into an exclusively claimed run directory, refuses a busy shared host, and launches a bounded, collectable transient systemd unit. A malformed or interrupted staging transfer leaves no final run directory. The host agent holds the nonblocking lock for the payload's complete lifetime and writes output directly to `run.log`. It atomically writes `status.json`; a final `finished` or `terminated` status with a numeric exit code is authoritative even after systemd garbage-collects the transient unit. `wait` tolerates bounded SSH transport interruptions, validates every status identity, fails immediately on a definitive remote lifecycle error, and returns the payload exit code. `stop` targets only the deterministic unit for the validated run ID and is idempotent for an authoritative final state or a unit that clearly never launched. If durable status is malformed, it still performs the exact-unit stop and reports a structured best-effort outcome instead of failing the finalizer.
+
+`--stop-timeout-seconds` must be at least 10 seconds. The host agent reserves five seconds of that timeout for writing final durable status; the remainder is available to the payload process group for TERM-triggered cleanup before SIGKILL.
+
+Keep finalization in a separate CI step so it can run when waiting fails or is cancelled. `RuntimeMaxSec` remains the independent backstop if the runner cannot reconnect. Product-specific setup, cleanup, and artifact upload should remain outside the generic job lifecycle.
+
 Set `CEPHTOOLS_TERRAGRUNT_DIR` or `CEPHTOOLS_TERRAFORM_ROOT` to point at plans outside the repository. The MicroCeph Terragrunt/Terraform module now lives in the
 [charm-microceph](https://github.com/canonical/charm-microceph/tree/main/terraform/microceph) repository.
 

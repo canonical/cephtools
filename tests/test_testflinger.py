@@ -373,11 +373,13 @@ def test_ensure_backend_config_creates_and_loads(tmp_path: Path) -> None:
 
 def test_build_deploy_script() -> None:
     script = build_deploy_script()
-    assert "snap install astral-uv --classic" in script
+    assert "releases/download/latest/cephtools" in script
+    assert "sudo chmod 0755 /usr/local/bin/cephtools" in script
+    assert 'test "$(cephtools testenv job protocol)" = "1"' in script
     assert "mkdir -p ~/src" in script
     assert "cd ~/src" in script
     assert "git clone https://github.com/canonical/cephtools.git" in script
-    assert 'export PATH="$PATH:$HOME/.local/bin"' in script
+    assert "uv pip install" not in script
     assert script.strip().endswith("cephtools testenv install")
 
 

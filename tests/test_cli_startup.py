@@ -20,7 +20,9 @@ def _run_cli(args: list[str], state_home: Path) -> subprocess.CompletedProcess[s
     )
 
 
-@pytest.mark.parametrize("args", [["--help"], ["testenv", "--help"]])
+@pytest.mark.parametrize(
+    "args", [["--help"], ["testenv", "--help"], ["testenv", "job", "--help"]]
+)
 def test_help_does_not_create_state(tmp_path: Path, args: list[str]) -> None:
     state_home = tmp_path / "state"
 
@@ -31,7 +33,9 @@ def test_help_does_not_create_state(tmp_path: Path, args: list[str]) -> None:
     assert not state_home.exists()
 
 
-@pytest.mark.parametrize("args", [["--help"], ["testenv", "--help"]])
+@pytest.mark.parametrize(
+    "args", [["--help"], ["testenv", "--help"], ["testenv", "job", "--help"]]
+)
 def test_help_ignores_legacy_config(tmp_path: Path, args: list[str]) -> None:
     state_home = tmp_path / "state"
     state_home.mkdir()
@@ -44,3 +48,13 @@ def test_help_ignores_legacy_config(tmp_path: Path, args: list[str]) -> None:
     assert "Usage:" in result.stdout
     assert legacy_config.read_text() == legacy_content
     assert sorted(path.name for path in state_home.iterdir()) == ["cephtools.yaml"]
+
+
+def test_job_protocol_does_not_create_state(tmp_path: Path) -> None:
+    state_home = tmp_path / "state"
+
+    result = _run_cli(["testenv", "job", "protocol"], state_home)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "1\n"
+    assert not state_home.exists()
