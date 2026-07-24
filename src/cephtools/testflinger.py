@@ -13,6 +13,7 @@ from typing import Callable, Iterable
 import click
 
 from cephtools.state import get_state_file, load_nested_yaml
+from cephtools.testenv_job import PROTOCOL_VERSION as TESTENV_JOB_PROTOCOL_VERSION
 
 
 DEFAULT_CONFIG_PATH = get_state_file("testflinger.yaml", ensure_parent=False)
@@ -570,13 +571,13 @@ def build_deploy_script(testenv_args: str | None = None) -> str:
     return "\n".join(
         [
             "set -euxo pipefail",
-            "sudo snap install astral-uv --classic",
+            "sudo wget -q -O /usr/local/bin/cephtools "
+            "https://github.com/canonical/cephtools/releases/download/latest/cephtools",
+            "sudo chmod 0755 /usr/local/bin/cephtools",
+            f'test "$(cephtools testenv job protocol)" = "{TESTENV_JOB_PROTOCOL_VERSION}"',
             "mkdir -p ~/src",
             "cd ~/src",
             "git clone https://github.com/canonical/cephtools.git",
-            "cd cephtools/",
-            "uv pip install --system --prefix ~/.local .",
-            'export PATH="$PATH:$HOME/.local/bin"',
             install_command,
             "",
         ]

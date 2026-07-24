@@ -25,6 +25,8 @@ jobs:
         run: just sync
       - name: Build PEX
         run: just build-pex dist/cephtools
+      - name: Smoke-test job protocol
+        run: test "$(./dist/cephtools testenv job protocol)" = "1"
       - name: Collect metadata
         run: |
           echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
