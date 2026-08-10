@@ -791,7 +791,13 @@ def _validate_status_response(
                 "remote job status has a malformed lifecycle error"
             )
         kind = lifecycle_error.get("kind", "lifecycle-error")
-        raise RemoteLifecycleError(f"{kind}: {lifecycle_error['message']}")
+        message = f"{kind}: {lifecycle_error['message']}"
+        # A successful SSH call can still encounter a transient systemd/D-Bus
+        # query failure. Let wait apply its existing reconnect/error budget;
+        # missing or inactive units without final status remain definitive.
+        if kind == "systemd-query-failed":
+            raise click.ClickException(message)
+        raise RemoteLifecycleError(message)
     durable = response.get("status")
     if not isinstance(durable, dict):
         raise click.ClickException(

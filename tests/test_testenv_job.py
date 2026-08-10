@@ -828,6 +828,105 @@ def test_malformed_durable_status_is_a_structured_lifecycle_error(
         job._validate_status_response(document, paths)
 
 
+def test_wait_retries_transient_systemd_query_failure_then_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = [
+        completed(
+            stdout=status_response(
+                {"state": "running"},
+                lifecycle_error={
+                    "kind": "systemd-query-failed",
+                    "message": "Failed to connect to bus",
+                },
+            )
+        ),
+        completed(
+            stdout=status_response(
+                {
+                    "protocol": job.PROTOCOL_VERSION,
+                    "run_id": "run",
+                    "unit": "cephtools-testenv-job-run.service",
+                    "state": "finished",
+                    "exit_code": 7,
+                }
+            )
+        ),
+    ]
+    calls = 0
+
+    def remote(*_args: Any, **_kwargs: Any):
+        nonlocal calls
+        calls += 1
+        return responses.pop(0)
+
+    monkeypatch.setattr(job, "run_remote", remote)
+    monkeypatch.setattr(job.time, "sleep", lambda _seconds: None)
+    result = CliRunner().invoke(
+        job.cli,
+        [
+            "wait",
+            "--target",
+            "ubuntu@example.test",
+            "--run-id",
+            "run",
+            "--run-root",
+            "/tmp/runs",
+            "--poll-interval",
+            "0",
+            "--max-consecutive-errors",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 7
+    assert "systemd-query-failed: Failed to connect to bus" in result.output
+    assert "lost contact" not in result.output
+    assert calls == 2
+
+
+def test_wait_counts_systemd_query_failures_against_error_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def remote(*_args: Any, **_kwargs: Any):
+        nonlocal calls
+        calls += 1
+        return completed(
+            stdout=status_response(
+                {"state": "running"},
+                lifecycle_error={
+                    "kind": "systemd-query-failed",
+                    "message": "Failed to connect to bus",
+                },
+            )
+        )
+
+    monkeypatch.setattr(job, "run_remote", remote)
+    monkeypatch.setattr(job.time, "sleep", lambda _seconds: None)
+    result = CliRunner().invoke(
+        job.cli,
+        [
+            "wait",
+            "--target",
+            "ubuntu@example.test",
+            "--run-id",
+            "run",
+            "--run-root",
+            "/tmp/runs",
+            "--poll-interval",
+            "0",
+            "--max-consecutive-errors",
+            "2",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "lost contact" in result.output
+    assert calls == 2
+
+
 def test_wait_fails_immediately_on_definitive_lifecycle_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
