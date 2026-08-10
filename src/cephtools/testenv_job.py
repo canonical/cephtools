@@ -25,6 +25,7 @@ import click
 
 
 PROTOCOL_VERSION = 1
+EXECUTION_USER = "ubuntu"
 DEFAULT_RUN_ROOT = "/home/ubuntu/.local/state/cephtools/jobs"
 DEFAULT_LOCK_FILE = "/run/lock/cephtools-testenv-job.lock"
 UNIT_PREFIX = "cephtools-testenv-job-"
@@ -269,6 +270,37 @@ def _process_error(
 ) -> click.ClickException:
     detail = _text(result.stderr).strip() or _text(result.stdout).strip()
     return click.ClickException(f"{action} failed ({result.returncode}): {detail}")
+
+
+def ensure_execution_user_linger(*, runner: Any | None = None) -> None:
+    """Keep the execution user's systemd manager alive between SSH polls."""
+    runner = runner or subprocess.run
+    enabled = runner(
+        ["sudo", "loginctl", "enable-linger", EXECUTION_USER],
+        capture_output=True,
+        text=True,
+    )
+    if enabled.returncode != 0:
+        raise _process_error(f"enable linger for {EXECUTION_USER}", enabled)
+
+    verified = runner(
+        [
+            "loginctl",
+            "show-user",
+            EXECUTION_USER,
+            "--property=Linger",
+            "--value",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if verified.returncode != 0:
+        raise _process_error(f"verify linger for {EXECUTION_USER}", verified)
+    if _text(verified.stdout).strip() != "yes":
+        raise click.ClickException(
+            f"linger verification for {EXECUTION_USER} returned "
+            f"{_text(verified.stdout).strip()!r}, expected 'yes'"
+        )
 
 
 def _remote_agent_or_error(
@@ -1121,6 +1153,7 @@ def launch_agent_cmd(
         raise click.ClickException(
             "cephtools executable is not available on the remote host"
         )
+    ensure_execution_user_linger()
     _write_status(
         paths,
         {
@@ -1136,9 +1169,9 @@ def launch_agent_cmd(
         "--unit",
         paths.unit,
         "--uid",
-        "ubuntu",
+        EXECUTION_USER,
         "--gid",
-        "ubuntu",
+        EXECUTION_USER,
         "--working-directory",
         str(working),
         "--property",

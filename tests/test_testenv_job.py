@@ -414,6 +414,57 @@ def test_start_stages_preflights_and_launches_in_order(
     assert isinstance(calls[1][1]["input_bytes"], bytes)
 
 
+def test_ensure_execution_user_linger_enables_and_verifies() -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(arguments: list[str], **_kwargs: Any):
+        calls.append(arguments)
+        if arguments[:2] == ["loginctl", "show-user"]:
+            return completed(stdout="yes\n")
+        return completed()
+
+    job.ensure_execution_user_linger(runner=fake_run)
+
+    assert calls == [
+        ["sudo", "loginctl", "enable-linger", "ubuntu"],
+        [
+            "loginctl",
+            "show-user",
+            "ubuntu",
+            "--property=Linger",
+            "--value",
+        ],
+    ]
+
+
+def test_ensure_execution_user_linger_reports_enable_failure() -> None:
+    def fake_run(_arguments: list[str], **_kwargs: Any):
+        return completed(1, stderr="permission denied")
+
+    with pytest.raises(click.ClickException, match="permission denied"):
+        job.ensure_execution_user_linger(runner=fake_run)
+
+
+def test_ensure_execution_user_linger_reports_verification_failure() -> None:
+    def fake_run(arguments: list[str], **_kwargs: Any):
+        if arguments[:2] == ["loginctl", "show-user"]:
+            return completed(1, stderr="user unavailable")
+        return completed()
+
+    with pytest.raises(click.ClickException, match="user unavailable"):
+        job.ensure_execution_user_linger(runner=fake_run)
+
+
+def test_ensure_execution_user_linger_rejects_unverified_state() -> None:
+    def fake_run(arguments: list[str], **_kwargs: Any):
+        if arguments[:2] == ["loginctl", "show-user"]:
+            return completed(stdout="no\n")
+        return completed()
+
+    with pytest.raises(click.ClickException, match="expected 'yes'"):
+        job.ensure_execution_user_linger(runner=fake_run)
+
+
 def test_start_agent_refuses_missing_staged_run(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         job.cli,
@@ -445,10 +496,12 @@ def test_start_agent_uses_detached_bounded_exact_systemd_unit(
 ) -> None:
     paths = job.derive_paths(str(tmp_path / "runs"), "run-1")
     paths.run_dir.mkdir(parents=True)
-    captured: list[str] = []
+    calls: list[list[str]] = []
 
     def fake_run(arguments: list[str], **_kwargs: Any):
-        captured.extend(arguments)
+        calls.append(arguments)
+        if arguments[:2] == ["loginctl", "show-user"]:
+            return completed(stdout="yes\n")
         return completed(stdout="launched")
 
     monkeypatch.setattr(job.shutil, "which", lambda _name: "/usr/local/bin/cephtools")
@@ -475,17 +528,28 @@ def test_start_agent_uses_detached_bounded_exact_systemd_unit(
     )
 
     assert result.exit_code == 0, result.output
-    assert captured[:2] == ["sudo", "systemd-run"]
-    assert "--collect" in captured
-    assert paths.unit in captured
-    assert "KillMode=control-group" in captured
-    assert "RuntimeMaxSec=60s" in captured
-    assert "TimeoutStopSec=30s" in captured
-    grace_index = captured.index("--kill-after-seconds")
-    assert captured[grace_index + 1] == "25"
-    assert "--pipe" not in captured
-    assert "--wait" not in captured
-    assert captured[-1] == "/bin/true"
+    assert calls[:2] == [
+        ["sudo", "loginctl", "enable-linger", "ubuntu"],
+        [
+            "loginctl",
+            "show-user",
+            "ubuntu",
+            "--property=Linger",
+            "--value",
+        ],
+    ]
+    launch = calls[2]
+    assert launch[:2] == ["sudo", "systemd-run"]
+    assert "--collect" in launch
+    assert paths.unit in launch
+    assert "KillMode=control-group" in launch
+    assert "RuntimeMaxSec=60s" in launch
+    assert "TimeoutStopSec=30s" in launch
+    grace_index = launch.index("--kill-after-seconds")
+    assert launch[grace_index + 1] == "25"
+    assert "--pipe" not in launch
+    assert "--wait" not in launch
+    assert launch[-1] == "/bin/true"
 
 
 def test_host_job_records_output_and_exit_code(tmp_path: Path) -> None:
