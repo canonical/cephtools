@@ -648,6 +648,62 @@ def test_deploy_with_retries_cancels_when_await_fails(
     assert cancel_calls == ["job-1"]  # job_id was known before await failed
 
 
+def test_deploy_with_retries_keep_on_failure_keeps_reservation(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path
+) -> None:
+    def always_fail(_jid):
+        raise ClickException("Remote deployment failed with exit code 255.")
+
+    calls = _install_deploy_fakes(monkeypatch, perform_behaviour=[always_fail])
+    echo: list[str] = []
+
+    with pytest.raises(ClickException, match="Deploy failed after 1 attempt"):
+        testflinger.deploy_with_retries(
+            queue_name="ceph-qa-1",
+            reserve_for=600,
+            config=BackendConfig("lp:tester"),
+            testenv_args="",
+            testflinger_bin="tf",
+            max_attempts=1,
+            runner=_no_op_runner,
+            echo=echo.append,
+            keep_on_failure=True,
+        )
+
+    assert calls["cancel"] == []
+    assert load_latest_reservation_job_id() == "job-1"
+    assert any("Keeping reservation job-1" in m for m in echo)
+    assert any("ubuntu@10.0.0.2" in m for m in echo)
+    assert any("tf cancel job-1" in m for m in echo)
+
+
+def test_deploy_with_retries_keep_on_failure_cancels_earlier_attempts(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path
+) -> None:
+    def always_fail(_jid):
+        raise ClickException("Remote deployment failed with exit code 1.")
+
+    calls = _install_deploy_fakes(
+        monkeypatch, perform_behaviour=[always_fail, always_fail]
+    )
+
+    with pytest.raises(ClickException, match="Deploy failed after 2 attempt"):
+        testflinger.deploy_with_retries(
+            queue_name="ceph-qa-1",
+            reserve_for=600,
+            config=BackendConfig("lp:tester"),
+            testenv_args="",
+            testflinger_bin="tf",
+            max_attempts=2,
+            runner=_no_op_runner,
+            echo=lambda _m: None,
+            keep_on_failure=True,
+        )
+
+    assert calls["cancel"] == ["job-1"]  # only the final attempt is kept
+    assert load_latest_reservation_job_id() == "job-2"
+
+
 def test_deploy_with_retries_rejects_zero_attempts() -> None:
     with pytest.raises(ClickException, match="must be a positive integer"):
         testflinger.deploy_with_retries(
@@ -688,6 +744,32 @@ def test_deploy_cli_passes_max_attempts(
 
     assert result.exit_code == 0, result.output
     assert captured["max_attempts"] == 3
+    assert captured["keep_on_failure"] is False
+
+
+def test_deploy_cli_passes_keep_on_failure(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(
+        "cephtools.testflinger.ensure_backend_config",
+        lambda *a, **k: (BackendConfig("lp:tester"), False),
+    )
+    monkeypatch.setattr(
+        "cephtools.testflinger._ssh_key_reference_warning", lambda v: None
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_deploy(**kwargs: Any) -> ReservationDetails:
+        captured.update(kwargs)
+        return _mk_details("job-1")
+
+    monkeypatch.setattr("cephtools.testflinger.deploy_with_retries", fake_deploy)
+
+    result = runner.invoke(cli, ["deploy", "ceph-qa-1", "--keep-on-failure"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["keep_on_failure"] is True
 
 
 def test_read_testenv_network_config(tmp_path: Path) -> None:
