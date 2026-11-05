@@ -626,6 +626,18 @@ def _best_effort_cancel(
         echo(f"Best-effort cancel of {job_id} failed: {exc.message}")
 
 
+def _report_kept_reservation(
+    job_id: str,
+    details: ReservationDetails | None,
+    testflinger_bin: str,
+    echo: Callable[[str], None],
+) -> None:
+    echo(f"Keeping reservation {job_id} for debugging (--keep-on-failure).")
+    if details is not None:
+        echo(f"Connect with: {_build_ssh_command(details)}")
+    echo(f"Cancel when done with: {testflinger_bin} cancel {job_id}")
+
+
 def deploy_with_retries(
     *,
     queue_name: str,
@@ -636,6 +648,7 @@ def deploy_with_retries(
     max_attempts: int,
     runner: Runner,
     echo: Callable[[str], None],
+    keep_on_failure: bool = False,
 ) -> ReservationDetails:
     """Reserve a queue and deploy testenv, retrying the whole job on failure.
 
@@ -644,6 +657,10 @@ def deploy_with_retries(
     reusing the host, because a bad host is a likely failure mode (e.g. a MAAS
     that cannot sync boot resources). After ``max_attempts`` failures the last
     error is re-raised.
+
+    With ``keep_on_failure`` the final failed attempt's reservation is left
+    running so the host can be inspected; earlier attempts are still cancelled
+    because a retry needs a fresh host.
     """
     if max_attempts < 1:
         raise click.ClickException("--max-attempts must be a positive integer.")
@@ -689,11 +706,17 @@ def deploy_with_retries(
                 f"Deploy attempt {attempt}/{max_attempts} failed on "
                 f"{where}: {exc.message}"
             )
-            cancel_job_id = details.job_id if details else job_id
-            if cancel_job_id:
-                _best_effort_cancel(cancel_job_id, testflinger_bin, runner, echo)
-                clear_latest_reservation(cancel_job_id)
-            if attempt < max_attempts:
+            final_attempt = attempt == max_attempts
+            failed_job_id = details.job_id if details else job_id
+            if failed_job_id:
+                if keep_on_failure and final_attempt:
+                    _report_kept_reservation(
+                        failed_job_id, details, testflinger_bin, echo
+                    )
+                else:
+                    _best_effort_cancel(failed_job_id, testflinger_bin, runner, echo)
+                    clear_latest_reservation(failed_job_id)
+            if not final_attempt:
                 echo("Retrying with a fresh reservation...")
                 continue
             break
@@ -840,6 +863,15 @@ def reserve(  # pragma: no cover - exercised via click integration tests
         "host. Set to >1 to ride out transient or bad-host failures."
     ),
 )
+@click.option(
+    "--keep-on-failure",
+    is_flag=True,
+    help=(
+        "Do not cancel the reservation when the final deploy attempt fails, "
+        "so the host can be inspected. Earlier failed attempts are still "
+        "cancelled before retrying."
+    ),
+)
 def deploy(  # pragma: no cover - exercised via click integration tests
     queue_name: str,
     reserve_for: int,
@@ -850,6 +882,7 @@ def deploy(  # pragma: no cover - exercised via click integration tests
     testflinger_bin: str,
     testenv_args: str,
     max_attempts: int,
+    keep_on_failure: bool,
 ) -> None:
     """Reserve a queue and install cephtools + testenv on it."""
     if reserve_for <= 0:
@@ -878,6 +911,7 @@ def deploy(  # pragma: no cover - exercised via click integration tests
         max_attempts=max_attempts,
         runner=subprocess.run,
         echo=click.echo,
+        keep_on_failure=keep_on_failure,
     )
 
 

@@ -74,6 +74,8 @@ This command:
 
 Set `--testenv-args` (or `CEPHTOOLS_TESTENV_ARGS`) to pass additional arguments to the remote `cephtools testenv ... install` command.
 
+If a deploy attempt fails, its reservation is cancelled (best-effort). Use `--max-attempts N` to retry with a fresh reservation, and `--keep-on-failure` to leave the final failed attempt's reservation running so you can SSH in and investigate; cancel it afterwards with `cephtools testflinger cancel --latest` (or by job id).
+
 Once complete, it provides the SSH command to access the ready-to-use test environment.
 
 ### Cancel a reservation
