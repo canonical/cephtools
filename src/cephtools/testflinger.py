@@ -12,8 +12,15 @@ from typing import Callable, Iterable
 
 import click
 
+from cephtools.moveroot import (
+    DEFAULT_REBOOT_TIMEOUT,
+    Remote,
+    move_root,
+    normalise_device,
+)
 from cephtools.state import get_state_file, load_nested_yaml
 from cephtools.testenv_job import PROTOCOL_VERSION as TESTENV_JOB_PROTOCOL_VERSION
+from cephtools.testenv_job import validate_target
 
 
 DEFAULT_CONFIG_PATH = get_state_file("testflinger.yaml", ensure_parent=False)
@@ -251,12 +258,14 @@ def save_latest_reservation(details: ReservationDetails) -> None:
     path.write_text("\n".join(lines))
 
 
-def load_latest_reservation_job_id(path: Path | None = None) -> str:
+def _load_latest_reservation(
+    path: Path | None, missing_hint: str
+) -> tuple[Path, dict[str, object]]:
     target = Path(path) if path is not None else latest_reservation_state_path()
     target = target.expanduser()
     if not target.exists():
         raise click.ClickException(
-            "No saved Testflinger reservation found. Pass JOB_ID or reserve a queue first."
+            f"No saved Testflinger reservation found. {missing_hint}"
         )
     data = load_nested_yaml(target)
     reservation = data.get("reservation")
@@ -264,10 +273,60 @@ def load_latest_reservation_job_id(path: Path | None = None) -> str:
         raise click.ClickException(
             f"{target} has unexpected structure for the 'reservation' section."
         )
+    return target, reservation
+
+
+def load_latest_reservation_job_id(path: Path | None = None) -> str:
+    target, reservation = _load_latest_reservation(
+        path, "Pass JOB_ID or reserve a queue first."
+    )
     job_id = reservation.get("job_id")
     if not isinstance(job_id, str) or not job_id.strip():
         raise click.ClickException(f"{target} is missing a valid reservation.job_id.")
     return job_id
+
+
+def load_latest_reservation(
+    path: Path | None = None,
+    missing_hint: str = "Pass --host USER@HOST or reserve a queue first.",
+) -> ReservationDetails:
+    """Load the latest saved reservation and check that it has not expired."""
+    target, reservation = _load_latest_reservation(path, missing_hint)
+    fields = {key: reservation.get(key) for key in ("job_id", "user", "ip")}
+    if not all(isinstance(value, str) and value for value in fields.values()):
+        raise click.ClickException(
+            f"{target} is missing reservation.job_id, reservation.user or "
+            "reservation.ip."
+        )
+    try:
+        expires_at = dt.datetime.fromisoformat(str(reservation.get("expires_at")))
+    except ValueError as exc:
+        raise click.ClickException(
+            f"{target} has an invalid reservation.expires_at."
+        ) from exc
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=dt.timezone.utc)
+    if expires_at <= dt.datetime.now(dt.timezone.utc):
+        raise click.ClickException(
+            f"The latest reservation {fields['job_id']} expired at "
+            f"{expires_at.isoformat()}. Reserve a new machine or pass --host."
+        )
+    queue_name = reservation.get("queue_name")
+    timeout_seconds = reservation.get("timeout_seconds")
+    return ReservationDetails(
+        job_id=str(fields["job_id"]),
+        queue_name=queue_name if isinstance(queue_name, str) else "",
+        user=str(fields["user"]),
+        ip=str(fields["ip"]),
+        expires_at=expires_at,
+        timeout_seconds=timeout_seconds if isinstance(timeout_seconds, int) else 0,
+    )
+
+
+def load_latest_reservation_target(path: Path | None = None) -> str:
+    """Return USER@IP of the latest saved, unexpired reservation."""
+    details = load_latest_reservation(path)
+    return f"{details.user}@{details.ip}"
 
 
 def clear_latest_reservation(
@@ -529,12 +588,15 @@ def reserve_node(
     return details
 
 
-def _build_ssh_command(details: ReservationDetails) -> str:
+def _ssh_command_for(target: str) -> str:
     return (
         "ssh -o 'StrictHostKeyChecking=no' "
-        "-o 'UserKnownHostsFile=/dev/null' "
-        f"'{details.user}@{details.ip}'"
+        f"-o 'UserKnownHostsFile=/dev/null' '{target}'"
     )
+
+
+def _build_ssh_command(details: ReservationDetails) -> str:
+    return _ssh_command_for(f"{details.user}@{details.ip}")
 
 
 def print_reservation_summary(
@@ -577,6 +639,8 @@ def build_deploy_script(testenv_args: str | None = None) -> str:
             f'test "$(cephtools testenv job protocol)" = "{TESTENV_JOB_PROTOCOL_VERSION}"',
             "mkdir -p ~/src",
             "cd ~/src",
+            # Keep an existing checkout so the script can run again on a host.
+            "[ -d cephtools/.git ] || "
             "git clone https://github.com/canonical/cephtools.git",
             install_command,
             "",
@@ -584,11 +648,7 @@ def build_deploy_script(testenv_args: str | None = None) -> str:
     )
 
 
-def perform_remote_deploy(
-    details: ReservationDetails,
-    script: str,
-    runner: Runner,
-) -> None:
+def _run_deploy_script(target: str, script: str, runner: Runner) -> None:
     result = runner(
         [
             "ssh",
@@ -596,7 +656,7 @@ def perform_remote_deploy(
             "StrictHostKeyChecking=no",
             "-o",
             "UserKnownHostsFile=/dev/null",
-            f"{details.user}@{details.ip}",
+            target,
             "bash",
             "-se",
         ],
@@ -608,6 +668,37 @@ def perform_remote_deploy(
         raise click.ClickException(
             f"Remote deployment failed with exit code {result.returncode}."
         )
+
+
+def perform_remote_deploy(
+    details: ReservationDetails,
+    script: str,
+    runner: Runner,
+) -> None:
+    _run_deploy_script(f"{details.user}@{details.ip}", script, runner)
+
+
+def deploy_to_host(
+    *,
+    target: str,
+    testenv_args: str,
+    runner: Runner,
+    echo: Callable[[str], None],
+) -> None:
+    """Install cephtools + testenv on a machine that is already reserved.
+
+    Nothing is reserved or cancelled: the caller owns the machine.
+    """
+    script = build_deploy_script(testenv_args)
+    echo(f"Configuring remote environment on {target} for testenv deployment.")
+    try:
+        _run_deploy_script(target, script, runner)
+    except click.ClickException as exc:
+        raise click.ClickException(
+            f"Failed to deploy testenv on {target}: {exc.message}"
+        ) from exc
+    echo("Remote deployment succeeded. Testenv should now be installed.")
+    echo(f"Connect with: {_ssh_command_for(target)}")
 
 
 def _best_effort_cancel(
@@ -728,6 +819,49 @@ def deploy_with_retries(
     raise click.ClickException(
         f"Deploy failed after {max_attempts} attempt(s). Last error: {last_exc.message}"
     )
+
+
+def _device_argument(_ctx: click.Context, _param: click.Parameter, value: str) -> str:
+    return normalise_device(value)
+
+
+def _host_option(
+    _ctx: click.Context, _param: click.Parameter, value: str | None
+) -> str | None:
+    return None if value is None else validate_target(value)
+
+
+# Deploy options that only make sense when deploy reserves a new machine.
+_RESERVATION_ONLY_PARAMS = (
+    "queue_name",
+    "reserve_for",
+    "config_path",
+    "launchpad_account",
+    "job_tag",
+    "mattermost_name",
+    "max_attempts",
+    "keep_on_failure",
+)
+
+
+def _explicitly_set(ctx: click.Context, names: Iterable[str]) -> list[str]:
+    """Display names of the given parameters that the user set explicitly."""
+    defaults = {
+        click.core.ParameterSource.DEFAULT,
+        click.core.ParameterSource.DEFAULT_MAP,
+        None,
+    }
+    labels = {
+        param.name: (
+            param.opts[0]
+            if isinstance(param, click.Option)
+            else param.human_readable_name
+        )
+        for param in ctx.command.params
+    }
+    return [
+        labels[name] for name in names if ctx.get_parameter_source(name) not in defaults
+    ]
 
 
 @click.group()
@@ -872,7 +1006,26 @@ def reserve(  # pragma: no cover - exercised via click integration tests
         "cancelled before retrying."
     ),
 )
+@click.option(
+    "--existing",
+    is_flag=True,
+    help=(
+        "Install onto the latest reservation made with 'reserve' or 'deploy' "
+        "instead of reserving a new machine."
+    ),
+)
+@click.option(
+    "--host",
+    "target",
+    callback=_host_option,
+    help=(
+        "Install onto this USER@HOST instead of reserving a new machine "
+        "(implies --existing)."
+    ),
+)
+@click.pass_context
 def deploy(  # pragma: no cover - exercised via click integration tests
+    ctx: click.Context,
     queue_name: str,
     reserve_for: int,
     config_path: Path,
@@ -883,8 +1036,37 @@ def deploy(  # pragma: no cover - exercised via click integration tests
     testenv_args: str,
     max_attempts: int,
     keep_on_failure: bool,
+    existing: bool,
+    target: str | None,
 ) -> None:
-    """Reserve a queue and install cephtools + testenv on it."""
+    """Reserve a queue and install cephtools + testenv on it.
+
+    With --existing or --host, install onto a machine that is already
+    reserved instead, for example after 'reserve' and 'moveroot'.
+    """
+    if existing or target:
+        conflicting = _explicitly_set(ctx, _RESERVATION_ONLY_PARAMS)
+        if conflicting:
+            raise click.UsageError(
+                f"{', '.join(conflicting)} only apply when deploy reserves a new "
+                "machine; drop them when using --existing or --host."
+            )
+        if target is None:
+            details = load_latest_reservation()
+            click.echo(
+                f"Deploying to the latest reservation {details.job_id} "
+                f"({details.user}@{details.ip}, expires "
+                f"{details.expires_at.isoformat()})."
+            )
+            target = f"{details.user}@{details.ip}"
+        deploy_to_host(
+            target=target,
+            testenv_args=testenv_args,
+            runner=subprocess.run,
+            echo=click.echo,
+        )
+        return
+
     if reserve_for <= 0:
         raise click.ClickException("--reserve-for must be a positive integer.")
     if max_attempts < 1:
@@ -912,6 +1094,59 @@ def deploy(  # pragma: no cover - exercised via click integration tests
         runner=subprocess.run,
         echo=click.echo,
         keep_on_failure=keep_on_failure,
+    )
+
+
+@cli.command("moveroot")
+@click.argument("old_dev", callback=_device_argument)
+@click.argument("new_dev", callback=_device_argument)
+@click.option(
+    "--host",
+    "target",
+    callback=_host_option,
+    help=(
+        "SSH target as USER@HOST. Defaults to the latest reservation made "
+        "with 'reserve' or 'deploy'."
+    ),
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Overwrite NEW_DEV even if it already has partitions or signatures.",
+)
+@click.option(
+    "--keep-old",
+    is_flag=True,
+    help="Do not wipe OLD_DEV after the host has booted from NEW_DEV.",
+)
+@click.option(
+    "--reboot-timeout",
+    type=click.IntRange(min=1),
+    default=DEFAULT_REBOOT_TIMEOUT,
+    show_default=True,
+    help="Seconds to wait for the host to come back after the reboot.",
+)
+def moveroot(
+    old_dev: str,
+    new_dev: str,
+    target: str | None,
+    force: bool,
+    keep_old: bool,
+    reboot_timeout: int,
+) -> None:
+    """Move the root filesystem of a reserved host from OLD_DEV to NEW_DEV.
+
+    Copies the running root and ESP onto NEW_DEV, makes it bootable, reboots
+    the host, checks that it came back on NEW_DEV and then wipes OLD_DEV.
+    Running it again after the reboot skips straight to the check and wipe.
+    """
+    move_root(
+        Remote(target or load_latest_reservation_target()),
+        old_dev=old_dev,
+        new_dev=new_dev,
+        force=force,
+        wipe_old=not keep_old,
+        reboot_timeout=reboot_timeout,
     )
 
 
