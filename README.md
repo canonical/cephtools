@@ -74,9 +74,45 @@ This command:
 
 Set `--testenv-args` (or `CEPHTOOLS_TESTENV_ARGS`) to pass additional arguments to the remote `cephtools testenv ... install` command.
 
+To install onto a machine you have already reserved instead of reserving a new one, pass `--existing` (the latest reservation from `reserve` or `deploy`) or `--host USER@HOST`. Nothing is reserved or cancelled in that case, and the options that only apply to reserving (`QUEUE_NAME`, `--reserve-for`, `--max-attempts`, `--keep-on-failure` and the config options) are rejected. Running it again on the same host is fine; an existing `~/src/cephtools` checkout is kept.
+
 If a deploy attempt fails, its reservation is cancelled (best-effort). Use `--max-attempts N` to retry with a fresh reservation, and `--keep-on-failure` to leave the final failed attempt's reservation running so you can SSH in and investigate; cancel it afterwards with `cephtools testflinger cancel --latest` (or by job id).
 
 Once complete, it provides the SSH command to access the ready-to-use test environment.
+
+### Move the root filesystem to another disk
+
+Free a reserved machine's boot disk (for example to use the NVMe for Ceph OSDs) by moving the running root filesystem onto another disk:
+
+```bash
+cephtools testflinger moveroot /dev/nvme0n1 /dev/sdb
+```
+
+This targets the latest reservation from `reserve` or `deploy`; pass `--host USER@HOST` for another machine. Device names may be given as `sdb`, `/dev/sdb` or `/dev/disk/by-id/...`. The command:
+
+1. Checks the layout: UEFI boot, an ext4 `/` on a plain partition of `OLD_DEV`, the ESP at `/boot/efi` on `OLD_DEV`, no separate `/boot`, and an empty `NEW_DEV` that is large enough.
+2. Partitions `NEW_DEV` (512 MiB ESP plus an ext4 root), copies the running system and the ESP onto it, and recreates active swap files instead of copying them.
+3. Rewrites `/etc/fstab` on the new root, reinstalls GRUB and regenerates the initramfs in a chroot, restores the original EFI `BootOrder` (so PXE stays first and MAAS can still manage the machine) and points the old ESP's GRUB stub at the new root.
+4. Reboots, waits for the host to come back and checks that `/` and `/boot/efi` are on `NEW_DEV`.
+5. Only then wipes `OLD_DEV`, which it finds again by filesystem UUID because disk names can change across a reboot, and removes EFI boot entries that pointed at it.
+
+The remote steps run as transient systemd units, so a dropped SSH connection does not interrupt them; the command reconnects and keeps following the log. If it stops after the reboot, run it again: it notices the host already runs from the new root and goes straight to the check and wipe.
+
+Options:
+
+- `--keep-old`: do not wipe `OLD_DEV` (re-run without it later to wipe).
+- `--force`: overwrite `NEW_DEV` even if it has partitions or signatures.
+- `--reboot-timeout <seconds>`: how long to wait for the host after rebooting (default 2700).
+
+Run it on a fresh reservation, before installing services such as LXD, since files that change during the copy can end up inconsistent. A typical sequence is:
+
+```bash
+cephtools testflinger reserve ceph-qa-1 --reserve-for 604000
+cephtools testflinger moveroot /dev/nvme0n1 /dev/sdb
+cephtools testflinger deploy --existing --testenv-args "--substrate maas-vm"
+```
+
+The change only lasts for the reservation: MAAS redeploys the machine afterwards.
 
 ### Cancel a reservation
 

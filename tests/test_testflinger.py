@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -770,6 +771,175 @@ def test_deploy_cli_passes_keep_on_failure(
 
     assert result.exit_code == 0, result.output
     assert captured["keep_on_failure"] is True
+
+
+def _save_details(expires_at: dt.datetime) -> None:
+    save_latest_reservation(
+        ReservationDetails(
+            job_id="job-7",
+            queue_name="ceph-qa-1",
+            user="ubuntu",
+            ip="10.241.199.15",
+            expires_at=expires_at,
+            timeout_seconds=604000,
+        )
+    )
+
+
+FUTURE = dt.datetime(2099, 1, 1, tzinfo=dt.timezone.utc)
+PAST = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
+
+
+def test_load_latest_reservation_round_trips(state_home: Path) -> None:
+    _save_details(FUTURE)
+    details = testflinger.load_latest_reservation()
+    assert details == ReservationDetails(
+        job_id="job-7",
+        queue_name="ceph-qa-1",
+        user="ubuntu",
+        ip="10.241.199.15",
+        expires_at=FUTURE,
+        timeout_seconds=604000,
+    )
+
+
+def test_load_latest_reservation_rejects_expired(state_home: Path) -> None:
+    _save_details(PAST)
+    with pytest.raises(ClickException, match="job-7 expired at 2020-01-01"):
+        testflinger.load_latest_reservation()
+
+
+def test_build_deploy_script_keeps_existing_checkout() -> None:
+    script = build_deploy_script()
+    assert (
+        "[ -d cephtools/.git ] || git clone https://github.com/canonical/cephtools.git"
+        in script
+    )
+
+
+def test_deploy_to_host_runs_script_without_reserving() -> None:
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def fake_runner(cmd: list[str], **kwargs: Any):
+        calls.append((cmd, kwargs))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    echo: list[str] = []
+    testflinger.deploy_to_host(
+        target="ubuntu@10.0.0.9",
+        testenv_args="--substrate maas-vm",
+        runner=fake_runner,
+        echo=echo.append,
+    )
+
+    assert len(calls) == 1
+    cmd, kwargs = calls[0]
+    assert cmd[-3:] == ["ubuntu@10.0.0.9", "bash", "-se"]
+    assert (
+        kwargs["input"]
+        .strip()
+        .endswith("cephtools testenv --substrate maas-vm install")
+    )
+    assert echo[-1] == (
+        "Connect with: ssh -o 'StrictHostKeyChecking=no' "
+        "-o 'UserKnownHostsFile=/dev/null' 'ubuntu@10.0.0.9'"
+    )
+
+
+def test_deploy_to_host_failure_names_target() -> None:
+    def failing_runner(cmd: list[str], **kwargs: Any):
+        return subprocess.CompletedProcess(cmd, 255)
+
+    with pytest.raises(ClickException, match="on ubuntu@10.0.0.9: .*exit code 255"):
+        testflinger.deploy_to_host(
+            target="ubuntu@10.0.0.9",
+            testenv_args="",
+            runner=failing_runner,
+            echo=lambda _m: None,
+        )
+
+
+def _capture_existing_deploy(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+
+    def fake_deploy_to_host(**kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    def must_not_run(*_a: Any, **_k: Any):
+        raise AssertionError("deploy onto an existing host must not reserve")
+
+    monkeypatch.setattr("cephtools.testflinger.deploy_to_host", fake_deploy_to_host)
+    monkeypatch.setattr("cephtools.testflinger.deploy_with_retries", must_not_run)
+    monkeypatch.setattr("cephtools.testflinger.ensure_backend_config", must_not_run)
+    return captured
+
+
+def test_deploy_cli_existing_uses_latest_reservation(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path
+) -> None:
+    _save_details(FUTURE)
+    captured = _capture_existing_deploy(monkeypatch)
+
+    result = CliRunner().invoke(
+        cli,
+        ["deploy", "--existing", "--testenv-args", "--substrate lxd"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["target"] == "ubuntu@10.241.199.15"
+    assert captured["testenv_args"] == "--substrate lxd"
+    assert "latest reservation job-7" in result.output
+
+
+def test_deploy_cli_host_skips_saved_reservation(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path
+) -> None:
+    captured = _capture_existing_deploy(monkeypatch)
+
+    result = CliRunner().invoke(
+        cli,
+        ["deploy", "--host", "ubuntu@10.0.0.9"],
+        env={"CEPHTOOLS_TESTENV_ARGS": "--substrate maas-vm"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["target"] == "ubuntu@10.0.0.9"
+    assert captured["testenv_args"] == "--substrate maas-vm"
+
+
+@pytest.mark.parametrize(
+    ("args", "named"),
+    [
+        (["--existing", "--max-attempts", "2"], "--max-attempts"),
+        (["--existing", "--keep-on-failure"], "--keep-on-failure"),
+        (["--host", "ubuntu@10.0.0.9", "--reserve-for", "60"], "--reserve-for"),
+        (["--existing", "ceph-qa-2"], "QUEUE_NAME"),
+    ],
+)
+def test_deploy_cli_existing_rejects_reservation_options(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path, args: list[str], named: str
+) -> None:
+    _save_details(FUTURE)
+    captured = _capture_existing_deploy(monkeypatch)
+
+    result = CliRunner().invoke(cli, ["deploy", *args])
+
+    assert result.exit_code == 2
+    assert named in result.output
+    assert captured == {}
+
+
+def test_deploy_cli_existing_with_expired_reservation(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path
+) -> None:
+    _save_details(PAST)
+    captured = _capture_existing_deploy(monkeypatch)
+
+    result = CliRunner().invoke(cli, ["deploy", "--existing"])
+
+    assert result.exit_code == 1
+    assert "expired" in result.output
+    assert captured == {}
 
 
 def test_read_testenv_network_config(tmp_path: Path) -> None:
