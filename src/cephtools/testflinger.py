@@ -831,6 +831,20 @@ def _host_option(
     return None if value is None else validate_target(value)
 
 
+DEFAULT_SSH_USER = "ubuntu"
+
+
+def _host_option_default_user(
+    _ctx: click.Context, _param: click.Parameter, value: str | None
+) -> str | None:
+    """Like _host_option, but accept a bare HOST and log in as DEFAULT_SSH_USER."""
+    if value is None:
+        return None
+    if "@" not in value:
+        value = f"{DEFAULT_SSH_USER}@{value}"
+    return validate_target(value)
+
+
 # Deploy options that only make sense when deploy reserves a new machine.
 _RESERVATION_ONLY_PARAMS = (
     "queue_name",
@@ -1103,10 +1117,10 @@ def deploy(  # pragma: no cover - exercised via click integration tests
 @click.option(
     "--host",
     "target",
-    callback=_host_option,
+    callback=_host_option_default_user,
     help=(
-        "SSH target as USER@HOST. Defaults to the latest reservation made "
-        "with 'reserve' or 'deploy'."
+        "SSH target as [USER@]HOST; USER defaults to ubuntu. Defaults to the "
+        "latest reservation made with 'reserve' or 'deploy'."
     ),
 )
 @click.option(

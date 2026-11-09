@@ -654,11 +654,25 @@ def test_moveroot_cli_options(
     assert captured["reboot_timeout"] == 60
 
 
+def test_moveroot_cli_host_defaults_to_ubuntu_user(
+    monkeypatch: pytest.MonkeyPatch, state_home: Path
+) -> None:
+    captured = _capture_move_root(monkeypatch)
+
+    result = CliRunner().invoke(
+        cli, ["moveroot", "/dev/nvme0n1", "/dev/sdb", "--host", "10.0.0.9"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["target"] == "ubuntu@10.0.0.9"
+
+
 @pytest.mark.parametrize(
     ("args", "message"),
     [
         (["/dev/sda", "/dev/sd b"], "is not a device"),
         (["/dev/sda", "/dev/sdb", "--host", "not a target"], "USER@HOST"),
+        (["/dev/sda", "/dev/sdb", "--host", "root@"], "USER@HOST"),
     ],
 )
 def test_moveroot_cli_rejects_bad_input(
