@@ -88,7 +88,7 @@ Free a reserved machine's boot disk (for example to use the NVMe for Ceph OSDs) 
 cephtools testflinger moveroot /dev/nvme0n1 /dev/sdb
 ```
 
-This targets the latest reservation from `reserve` or `deploy`; pass `--host USER@HOST` for another machine. Device names may be given as `sdb`, `/dev/sdb` or `/dev/disk/by-id/...`. The command:
+This targets the latest reservation from `reserve` or `deploy`; pass `--host [USER@]HOST` for another machine (the user defaults to `ubuntu`). Device names may be given as `sdb`, `/dev/sdb` or `/dev/disk/by-id/...`. The command:
 
 1. Checks the layout: UEFI boot, an ext4 `/` on a plain partition of `OLD_DEV`, the ESP at `/boot/efi` on `OLD_DEV`, no separate `/boot`, and an empty `NEW_DEV` that is large enough.
 2. Partitions `NEW_DEV` (512 MiB ESP plus an ext4 root), copies the running system and the ESP onto it, and recreates active swap files instead of copying them.
