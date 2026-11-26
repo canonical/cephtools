@@ -550,7 +550,15 @@ def test_configure_maas_region_restarts_temporal_services(monkeypatch):
     ]
 
 
-def test_lxd_init_impl_stops_and_restarts_bind9(monkeypatch):
+@pytest.mark.parametrize(
+    "trust_password_error",
+    [
+        None,
+        'Error: Cannot set "core.trust_password" to "": Unknown key\n',
+        'WARNING: snap notice\nError: Cannot set "core.trust_password" to "": Unknown key\n',
+    ],
+)
+def test_lxd_init_impl_stops_and_restarts_bind9(monkeypatch, trust_password_error):
     commands: list[object] = []
     echoes: list[str] = []
     ensured_networks: list[str] = []
@@ -561,11 +569,11 @@ def test_lxd_init_impl_stops_and_restarts_bind9(monkeypatch):
 
     def fake_run(cmd, check=True, shell=False, quiet=False):
         commands.append((cmd, check, shell))
-
-        class Result:
-            stdout = ""
-
-        return Result()
+        if cmd == ["lxc", "config", "unset", "core.trust_password"]:
+            return subprocess.CompletedProcess(
+                cmd, int(trust_password_error is not None), stderr=trust_password_error
+            )
+        return subprocess.CompletedProcess(cmd, 0, stdout="")
 
     monkeypatch.setattr(testenv, "run", fake_run)
     monkeypatch.setattr(
@@ -602,7 +610,7 @@ def test_lxd_init_impl_stops_and_restarts_bind9(monkeypatch):
     assert commands[4] == (["lxc", "query", "/1.0"], True, False)
     assert commands[5] == (
         ["lxc", "config", "unset", "core.trust_password"],
-        True,
+        False,
         False,
     )
     assert commands[6] == (
@@ -652,6 +660,34 @@ def test_lxd_init_impl_restarts_bind9_on_failure(monkeypatch):
         ("sudo snap set lxd daemon.user.group=adm", True, False),
         (["sudo", "systemctl", "start", "bind9"], False, False),
     ]
+
+
+def test_lxd_init_impl_fails_on_unexpected_trust_password_unset_error(monkeypatch):
+    commands: list[object] = []
+
+    def fake_run(cmd, check=True, shell=False, quiet=False):
+        commands.append((cmd, check, shell))
+        if cmd == ["lxc", "config", "unset", "core.trust_password"]:
+            return subprocess.CompletedProcess(
+                cmd, 1, stderr="Error: permission denied\n"
+            )
+        return subprocess.CompletedProcess(cmd, 0, stdout="")
+
+    monkeypatch.setattr(testenv, "run", fake_run)
+    monkeypatch.setattr(testenv, "_wait_for_bind9_shutdown", lambda: None)
+    monkeypatch.setattr(testenv, "_run_lxd_minimal_init", lambda: None)
+
+    with pytest.raises(
+        ClickException,
+        match="Failed to clear LXD password trust: Error: permission denied",
+    ):
+        testenv.lxd_init_impl("10.0.0.1", "lxdbr0")
+
+    assert commands[-1] == (["sudo", "systemctl", "start", "bind9"], False, False)
+    assert not any(
+        cmd == ["lxc", "config", "set", "core.https_address", ":8443"]
+        for cmd, _check, _shell in commands
+    )
 
 
 def test_wait_for_bind9_shutdown_waits_for_named_exit(monkeypatch):

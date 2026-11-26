@@ -903,6 +903,11 @@ def _wait_for_lxd_daemon_responsive(
     run(["lxc", "query", "/1.0"], check=True)
 
 
+def _is_unknown_lxd_trust_password_error(detail: str) -> bool:
+    normalized = detail.lower()
+    return "core.trust_password" in normalized and "unknown key" in normalized
+
+
 def _configure_lxd_common() -> None:
     run("sudo snap set lxd daemon.user.group=adm")
     _wait_for_lxd_daemon_responsive()
@@ -910,7 +915,14 @@ def _configure_lxd_common() -> None:
     # Remove password trust left by older cephtools versions before exposing
     # the LXD API. MAAS enrollment enables it only for the duration of a
     # single registration attempt.
-    run(["lxc", "config", "unset", "core.trust_password"], quiet=True)
+    result = run(
+        ["lxc", "config", "unset", "core.trust_password"], check=False, quiet=True
+    )
+    if result.returncode != 0:
+        detail = _format_process_error(result)
+        # LXD 6.1 removed the setting and clears it during upgrades.
+        if not _is_unknown_lxd_trust_password_error(detail):
+            raise click.ClickException(f"Failed to clear LXD password trust: {detail}")
     run(["lxc", "config", "set", "core.https_address", ":8443"])
 
 
